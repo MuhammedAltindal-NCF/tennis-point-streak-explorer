@@ -1,0 +1,239 @@
+library(shiny)
+library(tidyverse)
+library(plotly)
+
+# -----------------------------
+# Load data
+# -----------------------------
+points  <- read_csv("points_tableau.csv", show_col_types = FALSE)
+games   <- read_csv("games_tableau.csv", show_col_types = FALSE)
+overlay <- read_csv("streak_overlay_tableau.csv", show_col_types = FALSE)
+markers <- read_csv("markers_tableau.csv", show_col_types = FALSE)
+
+y_low  <- 0.935
+y_high <- 1.005
+
+# -----------------------------
+# UI
+# -----------------------------
+ui <- fluidPage(
+  titlePanel("Tennis Point Streak Explorer"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      selectInput(
+        "match_id",
+        "Choose Match:",
+        choices = sort(unique(points$match_id)),
+        selected = "2011-frenchopen-1403"
+      ),
+      
+      uiOutput("player_ui"),
+      uiOutput("min_length_ui"),
+      uiOutput("allowed_losses_ui")
+    ),
+    
+    mainPanel(
+      plotlyOutput("main_plot", height = "950px")
+    )
+  )
+)
+
+# -----------------------------
+# Server
+# -----------------------------
+server <- function(input, output, session) {
+  
+  match_players <- reactive({
+    pts <- points %>% filter(match_id == input$match_id)
+    unique(c(pts$P1_name, pts$P2_name))
+  })
+  
+  output$player_ui <- renderUI({
+    selectInput(
+      "player_name",
+      "Choose Player(s):",
+      choices = c("Both", match_players()),
+      selected = "Both"
+    )
+  })
+  
+  output$min_length_ui <- renderUI({
+    selectInput(
+      "min_length",
+      "Minimum Wins in Streak:",
+      choices = sort(unique(overlay$min_length)),
+      selected = 8
+    )
+  })
+  
+  output$allowed_losses_ui <- renderUI({
+    selectInput(
+      "allowed_losses",
+      "Allowed Losses:",
+      choices = sort(unique(overlay$allowed_losses)),
+      selected = 1
+    )
+  })
+  
+  filtered_points <- reactive({
+    points %>% filter(match_id == input$match_id)
+  })
+  
+  filtered_games <- reactive({
+    games %>% filter(match_id == input$match_id)
+  })
+  
+  filtered_overlay <- reactive({
+    ov <- overlay %>%
+      filter(
+        match_id == input$match_id,
+        min_length == as.numeric(input$min_length),
+        allowed_losses == as.numeric(input$allowed_losses)
+      )
+    
+    if (input$player_name != "Both") {
+      ov <- ov %>% filter(player_name == input$player_name)
+    }
+    
+    ov
+  })
+  
+  filtered_start_end <- reactive({
+    mk <- markers %>%
+      filter(
+        match_id == input$match_id,
+        marker_type %in% c("streak_start", "streak_end"),
+        min_length == as.numeric(input$min_length),
+        allowed_losses == as.numeric(input$allowed_losses)
+      )
+    
+    if (input$player_name != "Both") {
+      mk <- mk %>% filter(player_name == input$player_name)
+    }
+    
+    mk
+  })
+  
+  # -----------------------------
+  # Plot
+  # -----------------------------
+  output$main_plot <- renderPlotly({
+    
+    df_points  <- filtered_points()
+    df_games   <- filtered_games()
+    df_overlay <- filtered_overlay()
+    df_se      <- filtered_start_end()
+    
+    p1 <- unique(df_points$P1_name)[1]
+    p2 <- unique(df_points$P2_name)[1]
+    
+    df_games <- df_games %>%
+      mutate(server_name = factor(server_name, levels = c(p1, p2)))
+    
+    p <- ggplot() +
+      
+      # -----------------------------
+    # SERVER BACKGROUND
+    # -----------------------------
+    geom_rect(
+      data = df_games,
+      aes(
+        xmin = game_start - 0.5,
+        xmax = game_end + 0.5,
+        ymin = y_low,
+        ymax = y_high,
+        fill = server_name
+      ),
+      alpha = 0.35
+    ) +
+      
+      scale_fill_manual(
+        values = c("#f4cccc", "#d9e8fb"),
+        name = "Server"
+      ) +
+      
+      # -----------------------------
+    # STREAK OVERLAY
+    # -----------------------------
+    geom_line(
+      data = df_overlay,
+      aes(
+        x = point_in_set,
+        y = winner_y,
+        group = interaction(SetNo, streak_id, player_name)
+      ),
+      color = "grey20",
+      linewidth = 3
+    ) +
+      
+      # -----------------------------
+    # MAIN LINE
+    # -----------------------------
+    geom_line(
+      data = df_points,
+      aes(x = point_in_set, y = winner_y),
+      color = "black"
+    ) +
+      
+      geom_point(
+        data = df_points,
+        aes(x = point_in_set, y = winner_y),
+        color = "black",
+        size = 1.7
+      ) +
+      
+      # -----------------------------
+    # START / END MARKERS
+    # -----------------------------
+    geom_point(
+      data = df_se %>% filter(marker_type == "streak_start"),
+      aes(x = point_in_set, y = marker_y),
+      shape = 21,
+      size = 3.8,
+      stroke = 1.2,
+      fill = "white",
+      color = "darkgreen"
+    ) +
+      
+      geom_point(
+        data = df_se %>% filter(marker_type == "streak_end"),
+        aes(x = point_in_set, y = marker_y),
+        shape = 22,
+        size = 3.8,
+        stroke = 1.2,
+        fill = "white",
+        color = "firebrick"
+      ) +
+      
+      facet_wrap(~ SetNo, ncol = 1, scales = "free_x") +
+      
+      scale_y_continuous(
+        limits = c(y_low, y_high),
+        breaks = c(0.94, 1.00),
+        labels = c("Player 2", "Player 1")
+      ) +
+      
+      labs(
+        x = "Point in Set",
+        y = NULL,
+        title = paste0(p1, " vs ", p2, " - ", input$match_id),
+        subtitle = paste0(
+          "Player: ", input$player_name,
+          " | min_length=", input$min_length,
+          " | allowed_losses=", input$allowed_losses
+        ),
+        caption = "Grey = relaxed streaks"
+      ) +
+      
+      theme_minimal(base_size = 14) +
+      theme(
+        strip.text = element_text(face = "bold"),
+        plot.title = element_text(face = "bold", size = 18)
+      )
+    
+    ggplotly(p)
+  })
+}
+
+shinyApp(ui = ui, server = server)
