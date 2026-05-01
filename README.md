@@ -1,3 +1,9 @@
+## Live App
+
+The interactive Streamlit app is available here:
+
+https://tennis-point-streak-explorer.streamlit.app
+
 # Tennis Point Streak Explorer
 
 This project is an interactive Streamlit application for exploring point-by-point tennis streaks and comparing observed streak patterns against a simple independent binomial simulation model.
