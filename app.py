@@ -114,15 +114,13 @@ def prepare_match_points(points, match_id):
     match_df["game_score"] = match_df["P1Score_clean"] + "-" + match_df["P2Score_clean"]
     match_df["games_in_set"] = match_df["P1GamesWon_clean"] + "-" + match_df["P2GamesWon_clean"]
 
+    # Simplified hover text.
+    # Removed: Point details title, Set, Point winner, Server.
     match_df["hover_text"] = (
-        "<b>Point details</b>"
-        + "<br>Set: " + match_df["SetNo"].astype(str)
-        + "<br>Game: " + match_df["GameNo"].astype(str)
+        "Game: " + match_df["GameNo"].astype(str)
         + "<br>Point in set: " + match_df["point_in_set"].astype(str)
         + "<br>Game score: " + match_df["game_score"].astype(str)
         + "<br>Games in set: " + match_df["games_in_set"].astype(str)
-        + "<br>Point winner: " + match_df["winner_name_clean"].astype(str)
-        + "<br>Server: " + match_df["server_name_clean"].astype(str)
     )
 
     return match_df, p1, p2
@@ -456,12 +454,9 @@ def build_simulated_match_df(sim_paths, server_sequences, p1, p2, player_a_name)
 
     sim_df = pd.DataFrame(rows)
 
+    # Simplified simulated hover text.
     sim_df["hover_text"] = (
-        "<b>Simulated point details</b>"
-        + "<br>Set: " + sim_df["SetNo"].astype(str)
-        + "<br>Point in set: " + sim_df["point_in_set"].astype(str)
-        + "<br>Simulated winner: " + sim_df["winner_name_clean"].astype(str)
-        + "<br>Server from actual match: " + sim_df["server_name_clean"].astype(str)
+        "Point in set: " + sim_df["point_in_set"].astype(str)
         + "<br>Player A: " + str(player_a_name)
     )
 
@@ -536,6 +531,41 @@ def add_server_shading(fig, set_games, row, p1, p2):
             row=row,
             col=1
         )
+
+
+# ------------------------------------------------------------
+# Add service legend annotations
+# ------------------------------------------------------------
+def add_service_legend(fig, p1, p2):
+    fig.add_annotation(
+        x=0.99,
+        y=1.105,
+        xref="paper",
+        yref="paper",
+        text=f"{p1} served",
+        showarrow=False,
+        xanchor="right",
+        yanchor="top",
+        font=dict(size=11, color="black"),
+        bgcolor="rgba(255, 220, 220, 0.95)",
+        bordercolor="rgba(180, 180, 180, 0.8)",
+        borderwidth=1
+    )
+
+    fig.add_annotation(
+        x=0.99,
+        y=1.07,
+        xref="paper",
+        yref="paper",
+        text=f"{p2} served",
+        showarrow=False,
+        xanchor="right",
+        yanchor="top",
+        font=dict(size=11, color="black"),
+        bgcolor="rgba(220, 235, 255, 0.95)",
+        bordercolor="rgba(180, 180, 180, 0.8)",
+        borderwidth=1
+    )
 
 
 # ------------------------------------------------------------
@@ -750,7 +780,7 @@ def make_point_plot(match_df, match_games, streaks_df, p1, p2, match_id):
             font=dict(size=24, color="black")
         ),
         height=max(650, 175 * n_sets),
-        margin=dict(l=130, r=40, t=90, b=40),
+        margin=dict(l=130, r=40, t=115, b=40),
         plot_bgcolor="white",
         paper_bgcolor="white",
         font=dict(color="black"),
@@ -758,6 +788,8 @@ def make_point_plot(match_df, match_games, streaks_df, p1, p2, match_id):
 
     fig.update_annotations(font=dict(size=15, color="black"))
     fig.update_yaxes(showgrid=True, gridcolor="rgba(0,0,0,0.08)")
+
+    add_service_legend(fig, p1, p2)
 
     return fig
 
@@ -845,7 +877,7 @@ def make_simulated_point_plot(
             font=dict(size=20, color="black")
         ),
         height=max(650, 175 * n_sets),
-        margin=dict(l=130, r=40, t=90, b=40),
+        margin=dict(l=130, r=40, t=115, b=40),
         plot_bgcolor="white",
         paper_bgcolor="white",
         font=dict(color="black"),
@@ -853,6 +885,8 @@ def make_simulated_point_plot(
 
     fig.update_annotations(font=dict(size=15, color="black"))
     fig.update_yaxes(showgrid=True, gridcolor="rgba(0,0,0,0.08)")
+
+    add_service_legend(fig, p1, p2)
 
     return fig
 
