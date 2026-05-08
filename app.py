@@ -7,7 +7,6 @@ from plotly.subplots import make_subplots
 
 # ------------------------------------------------------------
 # Page setup
-# This block configures the Streamlit page title and layout.
 # ------------------------------------------------------------
 st.set_page_config(
     page_title="Tennis Point Streak Explorer",
@@ -17,8 +16,6 @@ st.set_page_config(
 
 # ------------------------------------------------------------
 # Load data
-# This block reads the point-level and game-level CSV files.
-# It also converts important columns into numeric format.
 # ------------------------------------------------------------
 @st.cache_data
 def load_data():
@@ -55,8 +52,6 @@ def load_data():
 
 # ------------------------------------------------------------
 # Score cleaning helper
-# This function removes unnecessary decimals from scores.
-# Example: 40.0 becomes 40, while AD stays AD.
 # ------------------------------------------------------------
 def clean_score_value(x):
     if pd.isna(x):
@@ -72,8 +67,6 @@ def clean_score_value(x):
 
 # ------------------------------------------------------------
 # Match label helper
-# This function creates readable dropdown labels for matches.
-# Example: Player 1 vs Player 2 — match_id
 # ------------------------------------------------------------
 def get_match_label(points, match_id):
     match_df = points[points["match_id"] == match_id]
@@ -89,24 +82,18 @@ def get_match_label(points, match_id):
 
 # ------------------------------------------------------------
 # Prepare actual match data
-# This function filters the selected match and creates variables
-# needed for plotting, hover labels, and point ordering.
 # ------------------------------------------------------------
 def prepare_match_points(points, match_id):
     match_df = points[points["match_id"] == match_id].copy()
     match_df = match_df.sort_values(["SetNo", "PointNumber"]).reset_index(drop=True)
 
-    # Create point order within each set.
     match_df["point_in_set"] = match_df.groupby("SetNo").cumcount() + 1
 
-    # Extract player names from the selected match.
     p1 = match_df["P1_name"].dropna().iloc[0]
     p2 = match_df["P2_name"].dropna().iloc[0]
 
-    # Create y-position: Player 1 is shown on top, Player 2 on bottom.
     match_df["winner_y"] = np.where(match_df["PointWinner"] == 1, 1.0, 0.0)
 
-    # Create clean point winner and server names.
     match_df["winner_name_clean"] = np.where(
         match_df["PointWinner"] == 1,
         p1,
@@ -119,17 +106,14 @@ def prepare_match_points(points, match_id):
         np.where(match_df["PointServer"] == 2, p2, "Unknown")
     )
 
-    # Clean tennis score labels for hover text.
     match_df["P1Score_clean"] = match_df["P1Score"].apply(clean_score_value)
     match_df["P2Score_clean"] = match_df["P2Score"].apply(clean_score_value)
     match_df["P1GamesWon_clean"] = match_df["P1GamesWon"].apply(clean_score_value)
     match_df["P2GamesWon_clean"] = match_df["P2GamesWon"].apply(clean_score_value)
 
-    # Create score strings for hover text.
     match_df["game_score"] = match_df["P1Score_clean"] + "-" + match_df["P2Score_clean"]
     match_df["games_in_set"] = match_df["P1GamesWon_clean"] + "-" + match_df["P2GamesWon_clean"]
 
-    # Create hover text for each point.
     match_df["hover_text"] = (
         "<b>Point details</b>"
         + "<br>Set: " + match_df["SetNo"].astype(str)
@@ -145,32 +129,41 @@ def prepare_match_points(points, match_id):
 
 
 # ------------------------------------------------------------
-# Count relaxed streaks from a binary sequence
-# This function counts non-overlapping streaks in a 0/1 sequence.
-# 1 means Player A won the point; 0 means Player A lost the point.
+# Sliding-window relaxed streak detection
 # ------------------------------------------------------------
-def count_relaxed_streaks_from_sequence(seq, min_wins=8, allowed_losses=1):
+def detect_relaxed_streaks_in_sequence(seq, point_nums=None, min_wins=8, allowed_losses=1):
+    """
+    Detect relaxed streaks using a sliding-window / all-start-points method.
+
+    This version does not jump to the end of a detected streak.
+    Every point is tested as a possible streak start.
+
+    Example:
+    1 1 1 1 1 1 0 is valid when min_wins = 6 and allowed_losses = 1.
+    """
+
     seq = np.asarray(seq).astype(int)
     n = len(seq)
 
-    count = 0
-    start = 0
+    if point_nums is None:
+        point_nums = np.arange(1, n + 1)
+    else:
+        point_nums = np.asarray(point_nums)
 
-    while start < n:
-        # A streak must start with a point won by Player A.
-        while start < n and seq[start] == 0:
-            start += 1
+    streaks = []
 
-        if start >= n:
-            break
+    for start in range(n):
+        if seq[start] != 1:
+            continue
 
         wins = 0
         losses = 0
-        end = start
-        best_end = None
 
-        # Extend the streak while losses stay within the allowed limit.
-        while end < n:
+        best_end = None
+        best_wins = 0
+        best_losses = 0
+
+        for end in range(start, n):
             if seq[end] == 1:
                 wins += 1
             else:
@@ -181,23 +174,65 @@ def count_relaxed_streaks_from_sequence(seq, min_wins=8, allowed_losses=1):
 
             if wins >= min_wins:
                 best_end = end
+                best_wins = wins
+                best_losses = losses
 
-            end += 1
-
-        # Count the streak and move past it to avoid double-counting.
         if best_end is not None:
-            count += 1
-            start = best_end + 1
-        else:
-            start += 1
+            streaks.append({
+                "start_index": int(start),
+                "end_index": int(best_end),
+                "start_point": int(point_nums[start]),
+                "end_point": int(point_nums[best_end]),
+                "points_won_in_streak": int(best_wins),
+                "points_lost_in_streak": int(best_losses),
+                "duration_points": int(point_nums[best_end] - point_nums[start] + 1),
+            })
 
-    return count
+    return streaks
 
 
 # ------------------------------------------------------------
-# Detect relaxed streak intervals
-# This function returns the start/end points of detected streaks
-# for one selected player.
+# Count relaxed streaks from a binary sequence
+# ------------------------------------------------------------
+def count_relaxed_streaks_from_sequence(seq, min_wins=8, allowed_losses=1):
+    streaks = detect_relaxed_streaks_in_sequence(
+        seq=seq,
+        point_nums=None,
+        min_wins=min_wins,
+        allowed_losses=allowed_losses
+    )
+
+    return len(streaks)
+
+
+# ------------------------------------------------------------
+# Count streaks for Player A only or both players
+# ------------------------------------------------------------
+def count_streaks_for_scope(seq, min_wins=8, allowed_losses=1, scope="Player A only"):
+    seq = np.asarray(seq).astype(int)
+
+    count_a = count_relaxed_streaks_from_sequence(
+        seq=seq,
+        min_wins=min_wins,
+        allowed_losses=allowed_losses
+    )
+
+    if scope == "Player A only":
+        return count_a
+
+    opponent_seq = 1 - seq
+
+    count_b = count_relaxed_streaks_from_sequence(
+        seq=opponent_seq,
+        min_wins=min_wins,
+        allowed_losses=allowed_losses
+    )
+
+    return count_a + count_b
+
+
+# ------------------------------------------------------------
+# Detect relaxed streak intervals for one selected player
 # ------------------------------------------------------------
 def find_relaxed_streaks(match_df, player_number, player_name, min_wins=8, allowed_losses=1):
     streaks = []
@@ -206,68 +241,36 @@ def find_relaxed_streaks(match_df, player_number, player_name, min_wins=8, allow
     for set_no, set_df in match_df.groupby("SetNo"):
         set_df = set_df.sort_values("point_in_set").reset_index(drop=True)
 
-        # Convert actual point winners into a binary sequence for the selected player.
         seq = (set_df["PointWinner"] == player_number).astype(int).values
         point_nums = set_df["point_in_set"].values
 
-        n = len(seq)
-        start = 0
+        detected = detect_relaxed_streaks_in_sequence(
+            seq=seq,
+            point_nums=point_nums,
+            min_wins=min_wins,
+            allowed_losses=allowed_losses
+        )
 
-        while start < n:
-            while start < n and seq[start] == 0:
-                start += 1
+        for s in detected:
+            streaks.append({
+                "streak_id": streak_id,
+                "player_number": player_number,
+                "player_name": player_name,
+                "SetNo": int(set_no),
+                "start_point": int(s["start_point"]),
+                "end_point": int(s["end_point"]),
+                "points_won_in_streak": int(s["points_won_in_streak"]),
+                "points_lost_in_streak": int(s["points_lost_in_streak"]),
+                "duration_points": int(s["duration_points"]),
+            })
 
-            if start >= n:
-                break
-
-            wins = 0
-            losses = 0
-            end = start
-
-            best_end = None
-            best_wins = 0
-            best_losses = 0
-
-            while end < n:
-                if seq[end] == 1:
-                    wins += 1
-                else:
-                    losses += 1
-
-                if losses > allowed_losses:
-                    break
-
-                if wins >= min_wins:
-                    best_end = end
-                    best_wins = wins
-                    best_losses = losses
-
-                end += 1
-
-            if best_end is not None:
-                streaks.append({
-                    "streak_id": streak_id,
-                    "player_number": player_number,
-                    "player_name": player_name,
-                    "SetNo": int(set_no),
-                    "start_point": int(point_nums[start]),
-                    "end_point": int(point_nums[best_end]),
-                    "points_won_in_streak": int(best_wins),
-                    "points_lost_in_streak": int(best_losses),
-                    "duration_points": int(point_nums[best_end] - point_nums[start] + 1),
-                })
-
-                streak_id += 1
-                start = best_end + 1
-            else:
-                start += 1
+            streak_id += 1
 
     return pd.DataFrame(streaks)
 
 
 # ------------------------------------------------------------
 # Calculate streaks for the selected visualization option
-# This function supports Both / Player 1 / Player 2 selections.
 # ------------------------------------------------------------
 def calculate_streaks_for_selection(match_df, player_choice, p1, p2, min_wins, allowed_losses):
     if player_choice == "Both":
@@ -308,33 +311,70 @@ def calculate_streaks_for_selection(match_df, player_choice, p1, p2, min_wins, a
 
 
 # ------------------------------------------------------------
-# Count actual streaks for simulation comparison
-# This function counts actual streaks for one Player A only.
-# It resets streak detection within each set.
+# Actual streak count for simulation comparison
 # ------------------------------------------------------------
-def actual_streak_count_by_player(match_df, player_number, min_wins, allowed_losses):
+def actual_streak_count_for_scope(match_df, player_number, min_wins, allowed_losses, scope):
     total = 0
 
     for _, set_df in match_df.groupby("SetNo"):
         set_df = set_df.sort_values("point_in_set")
         seq = (set_df["PointWinner"] == player_number).astype(int).values
 
-        total += count_relaxed_streaks_from_sequence(
-            seq,
+        total += count_streaks_for_scope(
+            seq=seq,
             min_wins=min_wins,
-            allowed_losses=allowed_losses
+            allowed_losses=allowed_losses,
+            scope=scope
         )
 
     return total
 
 
 # ------------------------------------------------------------
-# Run binomial simulations
-# This function simulates many independent Bernoulli match sequences.
-# It also keeps each simulated path so one representative graph can be drawn.
+# Estimate server win rate
 # ------------------------------------------------------------
-@st.cache_data
-def run_binomial_simulations_with_paths(set_lengths, n_sim, p, min_wins, allowed_losses, seed):
+def estimate_server_win_rate(df):
+    valid = df[
+        df["PointServer"].isin([1, 2]) &
+        df["PointWinner"].isin([1, 2])
+    ].copy()
+
+    if valid.empty:
+        return 0.50
+
+    server_won = valid["PointServer"] == valid["PointWinner"]
+    return float(server_won.mean())
+
+
+# ------------------------------------------------------------
+# Prepare server sequences by set for the selected match
+# ------------------------------------------------------------
+def get_server_sequences_by_set(match_df):
+    server_sequences = []
+
+    for _, set_df in match_df.groupby("SetNo"):
+        set_df = set_df.sort_values("point_in_set")
+        server_sequences.append(tuple(set_df["PointServer"].fillna(0).astype(int).values))
+
+    return tuple(server_sequences)
+
+
+# ------------------------------------------------------------
+# Run binomial simulations
+# ------------------------------------------------------------
+def run_binomial_simulations_with_paths(
+    set_lengths,
+    server_sequences,
+    player_a_number,
+    n_sim,
+    p,
+    min_wins,
+    allowed_losses,
+    seed,
+    scope,
+    simulation_model,
+    serve_advantage
+):
     rng = np.random.default_rng(seed)
 
     sim_counts = []
@@ -344,15 +384,32 @@ def run_binomial_simulations_with_paths(set_lengths, n_sim, p, min_wins, allowed
         total_count = 0
         by_set = []
 
-        # Preserve the same number of points in each actual set.
-        for set_len in set_lengths:
-            seq = rng.binomial(1, p, size=int(set_len))
+        for set_idx, set_len in enumerate(set_lengths):
+            set_len = int(set_len)
+
+            if simulation_model == "Serve-adjusted Bernoulli":
+                servers = np.asarray(server_sequences[set_idx]).astype(int)
+
+                probs = np.where(
+                    servers == player_a_number,
+                    p + serve_advantage,
+                    p - serve_advantage
+                )
+
+                probs = np.where(np.isin(servers, [1, 2]), probs, p)
+                probs = np.clip(probs, 0.0, 1.0)
+
+                seq = rng.binomial(1, probs)
+            else:
+                seq = rng.binomial(1, p, size=set_len)
+
             by_set.append(seq.tolist())
 
-            total_count += count_relaxed_streaks_from_sequence(
-                seq,
+            total_count += count_streaks_for_scope(
+                seq=seq,
                 min_wins=min_wins,
-                allowed_losses=allowed_losses
+                allowed_losses=allowed_losses,
+                scope=scope
             )
 
         sim_counts.append(total_count)
@@ -363,16 +420,16 @@ def run_binomial_simulations_with_paths(set_lengths, n_sim, p, min_wins, allowed
 
 # ------------------------------------------------------------
 # Build simulated match dataframe
-# This function converts one simulated 0/1 path into a match-like dataframe
-# so it can be plotted using the same style as the actual match.
 # ------------------------------------------------------------
-def build_simulated_match_df(sim_paths, p1, p2, player_a_name):
+def build_simulated_match_df(sim_paths, server_sequences, p1, p2, player_a_name):
     player_a_number = 1 if player_a_name == p1 else 2
 
     rows = []
     global_point = 0
 
     for set_no, seq in enumerate(sim_paths, start=1):
+        servers = server_sequences[set_no - 1]
+
         for point_in_set, a_win in enumerate(seq, start=1):
             global_point += 1
 
@@ -381,7 +438,9 @@ def build_simulated_match_df(sim_paths, p1, p2, player_a_name):
             else:
                 point_winner = 2 if player_a_number == 1 else 1
 
+            server_number = int(servers[point_in_set - 1])
             winner_name = p1 if point_winner == 1 else p2
+            server_name = p1 if server_number == 1 else p2 if server_number == 2 else "Unknown"
             winner_y = 1.0 if point_winner == 1 else 0.0
 
             rows.append({
@@ -389,8 +448,10 @@ def build_simulated_match_df(sim_paths, p1, p2, player_a_name):
                 "PointNumber": global_point,
                 "point_in_set": point_in_set,
                 "PointWinner": point_winner,
+                "PointServer": server_number,
                 "winner_y": winner_y,
                 "winner_name_clean": winner_name,
+                "server_name_clean": server_name,
             })
 
     sim_df = pd.DataFrame(rows)
@@ -400,6 +461,7 @@ def build_simulated_match_df(sim_paths, p1, p2, player_a_name):
         + "<br>Set: " + sim_df["SetNo"].astype(str)
         + "<br>Point in set: " + sim_df["point_in_set"].astype(str)
         + "<br>Simulated winner: " + sim_df["winner_name_clean"].astype(str)
+        + "<br>Server from actual match: " + sim_df["server_name_clean"].astype(str)
         + "<br>Player A: " + str(player_a_name)
     )
 
@@ -407,9 +469,49 @@ def build_simulated_match_df(sim_paths, p1, p2, player_a_name):
 
 
 # ------------------------------------------------------------
+# Calculate simulated streaks for plotting
+# ------------------------------------------------------------
+def calculate_simulated_streaks_for_scope(
+    sim_df,
+    p1,
+    p2,
+    sim_player,
+    min_wins,
+    allowed_losses,
+    scope
+):
+    sim_player_number = 1 if sim_player == p1 else 2
+
+    if scope == "Player A only":
+        return find_relaxed_streaks(
+            match_df=sim_df,
+            player_number=sim_player_number,
+            player_name=sim_player,
+            min_wins=min_wins,
+            allowed_losses=allowed_losses
+        )
+
+    streaks_p1 = find_relaxed_streaks(
+        match_df=sim_df,
+        player_number=1,
+        player_name=p1,
+        min_wins=min_wins,
+        allowed_losses=allowed_losses
+    )
+
+    streaks_p2 = find_relaxed_streaks(
+        match_df=sim_df,
+        player_number=2,
+        player_name=p2,
+        min_wins=min_wins,
+        allowed_losses=allowed_losses
+    )
+
+    return pd.concat([streaks_p1, streaks_p2], ignore_index=True)
+
+
+# ------------------------------------------------------------
 # Add server shading
-# This function uses game-level data to add light background shading
-# according to the server in each game.
 # ------------------------------------------------------------
 def add_server_shading(fig, set_games, row, p1, p2):
     for _, g in set_games.iterrows():
@@ -438,8 +540,6 @@ def add_server_shading(fig, set_games, row, p1, p2):
 
 # ------------------------------------------------------------
 # Add path segment
-# This function draws a thick transparent line following the point path.
-# It avoids connecting non-consecutive point segments.
 # ------------------------------------------------------------
 def add_path_segment(fig, path_df, row, color, width):
     if path_df.empty:
@@ -467,14 +567,11 @@ def add_path_segment(fig, path_df, row, color, width):
 
 # ------------------------------------------------------------
 # Add streak shading tubes
-# This function adds grey transparent streak shading that follows
-# the actual point path. Overlapping streaks become darker.
 # ------------------------------------------------------------
 def add_streak_tubes(fig, set_df, set_streaks, row):
     if set_streaks.empty:
         return
 
-    # Draw a base light tube for each streak.
     for _, s in set_streaks.iterrows():
         path_df = set_df[
             (set_df["point_in_set"] >= s["start_point"]) &
@@ -485,11 +582,10 @@ def add_streak_tubes(fig, set_df, set_streaks, row):
             fig=fig,
             path_df=path_df,
             row=row,
-            color="rgba(90, 90, 90, 0.16)",
-            width=14
+            color="rgba(90, 90, 90, 0.13)",
+            width=12
         )
 
-    # Count how many streaks overlap at each point.
     overlap_df = set_df[["point_in_set", "winner_y"]].copy()
     overlap_df["overlap_n"] = 0
 
@@ -500,32 +596,27 @@ def add_streak_tubes(fig, set_df, set_streaks, row):
         )
         overlap_df.loc[mask, "overlap_n"] += 1
 
-    # Darken areas with 2 or more overlapping streaks.
     overlap_2 = overlap_df[overlap_df["overlap_n"] >= 2].copy()
     add_path_segment(
         fig=fig,
         path_df=overlap_2,
         row=row,
-        color="rgba(70, 70, 70, 0.26)",
-        width=14
+        color="rgba(70, 70, 70, 0.22)",
+        width=12
     )
 
-    # Darken areas with 3 or more overlapping streaks even more.
     overlap_3 = overlap_df[overlap_df["overlap_n"] >= 3].copy()
     add_path_segment(
         fig=fig,
         path_df=overlap_3,
         row=row,
-        color="rgba(45, 45, 45, 0.38)",
-        width=14
+        color="rgba(45, 45, 45, 0.34)",
+        width=12
     )
 
 
 # ------------------------------------------------------------
 # Add streak start/end markers
-# Start marker = green vertical line.
-# End marker = red horizontal line.
-# Markers are placed at the actual point location.
 # ------------------------------------------------------------
 def add_streak_markers(fig, set_streaks, set_df, row):
     if set_streaks.empty:
@@ -548,17 +639,18 @@ def add_streak_markers(fig, set_streaks, set_df, row):
         else:
             y_end = 1.0 if int(s["player_number"]) == 1 else 0.0
 
-        # Draw green vertical start marker.
         fig.add_trace(
             go.Scatter(
                 x=[x_start, x_start],
-                y=[y_start - 0.14, y_start + 0.14],
+                y=[y_start - 0.13, y_start + 0.13],
                 mode="lines",
                 line=dict(color="green", width=2),
                 hovertemplate=(
                     "Streak Start"
                     + "<br>Player: " + str(s["player_name"])
                     + "<br>Point in set: " + str(x_start)
+                    + "<br>Wins in streak: " + str(s["points_won_in_streak"])
+                    + "<br>Losses used: " + str(s["points_lost_in_streak"])
                     + "<extra></extra>"
                 ),
                 showlegend=False
@@ -567,10 +659,9 @@ def add_streak_markers(fig, set_streaks, set_df, row):
             col=1
         )
 
-        # Draw red horizontal end marker.
         fig.add_trace(
             go.Scatter(
-                x=[x_end - 0.38, x_end + 0.38],
+                x=[x_end - 0.32, x_end + 0.32],
                 y=[y_end, y_end],
                 mode="lines",
                 line=dict(color="red", width=2),
@@ -578,6 +669,7 @@ def add_streak_markers(fig, set_streaks, set_df, row):
                     "Streak End"
                     + "<br>Player: " + str(s["player_name"])
                     + "<br>Point in set: " + str(x_end)
+                    + "<br>Duration: " + str(s["duration_points"]) + " points"
                     + "<extra></extra>"
                 ),
                 showlegend=False
@@ -589,8 +681,6 @@ def add_streak_markers(fig, set_streaks, set_df, row):
 
 # ------------------------------------------------------------
 # Create actual match plot
-# This function creates the main point-by-point visualization
-# for the selected real match.
 # ------------------------------------------------------------
 def make_point_plot(match_df, match_games, streaks_df, p1, p2, match_id):
     sets = sorted(match_df["SetNo"].dropna().unique())
@@ -613,13 +703,9 @@ def make_point_plot(match_df, match_games, streaks_df, p1, p2, match_id):
         else:
             set_streaks = pd.DataFrame()
 
-        # Add server background shading.
         add_server_shading(fig, set_games, row, p1, p2)
-
-        # Add streak shading before the black point line.
         add_streak_tubes(fig, set_df, set_streaks, row)
 
-        # Add main point-by-point line and markers.
         fig.add_trace(
             go.Scatter(
                 x=set_df["point_in_set"],
@@ -635,10 +721,8 @@ def make_point_plot(match_df, match_games, streaks_df, p1, p2, match_id):
             col=1
         )
 
-        # Add start/end markers after the main line.
         add_streak_markers(fig, set_streaks, set_df, row)
 
-        # Format y-axis with actual player names.
         fig.update_yaxes(
             tickvals=[0, 1],
             ticktext=[p2, p1],
@@ -648,7 +732,6 @@ def make_point_plot(match_df, match_games, streaks_df, p1, p2, match_id):
             col=1
         )
 
-        # Hide x-axis tick labels to keep the plot clean.
         fig.update_xaxes(
             showticklabels=False,
             ticks="",
@@ -681,10 +764,18 @@ def make_point_plot(match_df, match_games, streaks_df, p1, p2, match_id):
 
 # ------------------------------------------------------------
 # Create simulated match plot
-# This function creates a point-by-point visualization for one
-# representative simulated Bernoulli match.
 # ------------------------------------------------------------
-def make_simulated_point_plot(sim_df, sim_streaks_df, p1, p2, player_a_name, p, rep_count):
+def make_simulated_point_plot(
+    sim_df,
+    sim_streaks_df,
+    p1,
+    p2,
+    player_a_name,
+    p,
+    rep_count,
+    simulation_model,
+    scope
+):
     sets = sorted(sim_df["SetNo"].dropna().unique())
     n_sets = len(sets)
 
@@ -704,10 +795,8 @@ def make_simulated_point_plot(sim_df, sim_streaks_df, p1, p2, player_a_name, p, 
         else:
             set_streaks = pd.DataFrame()
 
-        # Add simulated streak shading.
         add_streak_tubes(fig, set_df, set_streaks, row)
 
-        # Add simulated point-by-point line.
         fig.add_trace(
             go.Scatter(
                 x=set_df["point_in_set"],
@@ -723,7 +812,6 @@ def make_simulated_point_plot(sim_df, sim_streaks_df, p1, p2, player_a_name, p, 
             col=1
         )
 
-        # Add simulated streak start/end markers.
         add_streak_markers(fig, set_streaks, set_df, row)
 
         fig.update_yaxes(
@@ -749,11 +837,12 @@ def make_simulated_point_plot(sim_df, sim_streaks_df, p1, p2, player_a_name, p, 
         title=dict(
             text=(
                 f"Representative Simulated Match — Player A: {player_a_name}, "
-                f"p = {p:.2f}, simulated streaks = {rep_count}"
+                f"p = {p:.2f}, model = {simulation_model}, scope = {scope}, "
+                f"simulated streaks = {rep_count}"
             ),
             x=0.5,
             xanchor="center",
-            font=dict(size=22, color="black")
+            font=dict(size=20, color="black")
         ),
         height=max(650, 175 * n_sets),
         margin=dict(l=130, r=40, t=90, b=40),
@@ -769,8 +858,46 @@ def make_simulated_point_plot(sim_df, sim_streaks_df, p1, p2, player_a_name, p, 
 
 
 # ------------------------------------------------------------
+# Create simulation histogram
+# ------------------------------------------------------------
+def make_simulation_histogram(sim_counts, actual_count):
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Histogram(
+            x=sim_counts,
+            nbinsx=max(5, min(30, len(np.unique(sim_counts)))),
+            name="Simulated streak counts"
+        )
+    )
+
+    fig.add_vline(
+        x=actual_count,
+        line_dash="dash",
+        line_width=3,
+        annotation_text="Actual",
+        annotation_position="top right"
+    )
+
+    fig.update_layout(
+        title="Distribution of Simulated Streak Counts",
+        xaxis_title="Number of streaks in simulated match",
+        yaxis_title="Frequency",
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        font=dict(color="black"),
+        height=420,
+        margin=dict(l=60, r=40, t=70, b=60)
+    )
+
+    fig.update_xaxes(showgrid=True, gridcolor="rgba(0,0,0,0.08)")
+    fig.update_yaxes(showgrid=True, gridcolor="rgba(0,0,0,0.08)")
+
+    return fig
+
+
+# ------------------------------------------------------------
 # Main app: data loading
-# This block loads data and prepares the sidebar controls.
 # ------------------------------------------------------------
 points, games = load_data()
 
@@ -798,7 +925,6 @@ match_games = games[games["match_id"] == selected_match_id].copy()
 
 # ------------------------------------------------------------
 # Sidebar: actual match controls
-# This block controls the actual match visualization.
 # ------------------------------------------------------------
 player_choice = st.sidebar.selectbox(
     "Choose Player(s):",
@@ -820,7 +946,6 @@ allowed_losses = st.sidebar.selectbox(
 
 # ------------------------------------------------------------
 # Sidebar: simulation controls
-# This block controls the binomial independent-process simulation.
 # ------------------------------------------------------------
 st.sidebar.divider()
 
@@ -831,34 +956,81 @@ sim_player = st.sidebar.selectbox(
     [p1, p2]
 )
 
-n_sim = st.sidebar.selectbox(
-    "Number of Simulations:",
-    [500, 1000, 5000, 10000],
-    index=1
+sim_scope = st.sidebar.selectbox(
+    "Streaks Counted in Simulation:",
+    ["Player A only", "Both players"]
+)
+
+n_sim = st.sidebar.number_input(
+    "Number of Simulations (1 = simulate one match):",
+    min_value=1,
+    max_value=10000,
+    value=1000,
+    step=1
 )
 
 p_sim = st.sidebar.number_input(
-    "Probability of Success for Player A:",
+    "Base Probability of Success for Player A:",
     min_value=0.00,
     max_value=1.00,
     value=0.50,
     step=0.01
 )
 
-seed = st.sidebar.number_input(
-    "Random Seed:",
-    min_value=1,
-    max_value=999999,
-    value=123,
-    step=1
+simulation_model = st.sidebar.selectbox(
+    "Simulation Model:",
+    ["Simple independent Bernoulli", "Serve-adjusted Bernoulli"]
 )
+
+overall_server_win_rate = estimate_server_win_rate(points)
+estimated_serve_advantage = overall_server_win_rate - 0.50
+
+serve_advantage = 0.0
+
+if simulation_model == "Serve-adjusted Bernoulli":
+    st.sidebar.caption(
+        f"Overall server win rate across all matches: {overall_server_win_rate:.3f}. "
+        f"Estimated serve advantage: {estimated_serve_advantage:.3f}."
+    )
+
+    use_estimated_serve_advantage = st.sidebar.checkbox(
+        "Use overall observed serve advantage",
+        value=True
+    )
+
+    if use_estimated_serve_advantage:
+        serve_advantage = estimated_serve_advantage
+    else:
+        serve_advantage = st.sidebar.number_input(
+            "Manual Serve Advantage:",
+            min_value=0.00,
+            max_value=0.20,
+            value=0.03,
+            step=0.01
+        )
+
+use_seed = st.sidebar.checkbox(
+    "Use random seed for reproducibility",
+    value=False
+)
+
+if use_seed:
+    seed = st.sidebar.number_input(
+        "Random Seed:",
+        min_value=1,
+        max_value=999999,
+        value=123,
+        step=1
+    )
+    seed_value = int(seed)
+else:
+    seed_value = None
 
 run_sim = st.sidebar.button("Run Binomial Simulation")
 
 
 # ------------------------------------------------------------
 # Actual match streak calculation
-# This block calculates streaks for the selected actual match.
 # ------------------------------------------------------------
 streaks_df = calculate_streaks_for_selection(
     match_df=match_df,
@@ -872,7 +1044,6 @@ streaks_df = calculate_streaks_for_selection(
 
 # ------------------------------------------------------------
 # Main page: actual match section
-# This block displays the selected match metrics and graph.
 # ------------------------------------------------------------
 st.title("Tennis Point Streak Explorer")
 
@@ -911,18 +1082,18 @@ st.plotly_chart(actual_fig, use_container_width=True)
 
 # ------------------------------------------------------------
 # Main page: simulation section
-# This block calculates and displays simulation metrics and graph.
 # ------------------------------------------------------------
 st.divider()
 st.subheader("Binomial Independent Process Simulation")
 
 sim_player_number = 1 if sim_player == p1 else 2
 
-actual_sim_count = actual_streak_count_by_player(
+actual_sim_count = actual_streak_count_for_scope(
     match_df=match_df,
     player_number=sim_player_number,
     min_wins=min_length,
-    allowed_losses=allowed_losses
+    allowed_losses=allowed_losses,
+    scope=sim_scope
 )
 
 set_lengths = tuple(
@@ -930,36 +1101,59 @@ set_lengths = tuple(
     for _, set_df in match_df.groupby("SetNo")
 )
 
-sim_col1, sim_col2, sim_col3 = st.columns(3)
+server_sequences = get_server_sequences_by_set(match_df)
+
+sim_col1, sim_col2, sim_col3, sim_col4 = st.columns(4)
 
 with sim_col1:
-    st.metric("Simulation Player", sim_player)
+    st.metric("Simulation Player A", sim_player)
 
 with sim_col2:
-    st.metric("Actual Player Streaks", actual_sim_count)
+    st.metric("Counting Scope", sim_scope)
 
 with sim_col3:
-    st.metric("Point Win Probability", f"{p_sim:.2f}")
+    st.metric("Actual Streaks for Scope", actual_sim_count)
+
+with sim_col4:
+    st.metric("Base Win Probability", f"{p_sim:.2f}")
+
+if simulation_model == "Serve-adjusted Bernoulli":
+    st.markdown(
+        f"""
+        **Simulation model:** Serve-adjusted Bernoulli  
+        **Overall server win rate across all matches:** {overall_server_win_rate:.3f}  
+        **Serve advantage used:** {serve_advantage:.3f}  
+        """
+    )
+else:
+    st.markdown(
+        """
+        **Simulation model:** Simple independent Bernoulli  
+        Each point is simulated independently with the same base probability.
+        """
+    )
 
 
 # ------------------------------------------------------------
 # Run simulation after button click
-# This block runs all simulations, selects one representative path,
-# and draws the simulated match graph.
 # ------------------------------------------------------------
 if run_sim:
     sim_counts, sim_paths_all = run_binomial_simulations_with_paths(
         set_lengths=set_lengths,
+        server_sequences=server_sequences,
+        player_a_number=sim_player_number,
         n_sim=int(n_sim),
         p=float(p_sim),
         min_wins=int(min_length),
         allowed_losses=int(allowed_losses),
-        seed=int(seed)
+        seed=seed_value,
+        scope=sim_scope,
+        simulation_model=simulation_model,
+        serve_advantage=float(serve_advantage)
     )
 
     prob_at_least_actual = float(np.mean(sim_counts >= actual_sim_count))
 
-    # Select the representative simulation closest to the median simulated streak count.
     sim_median = np.median(sim_counts)
     rep_idx = int(np.argmin(np.abs(sim_counts - sim_median)))
 
@@ -968,17 +1162,20 @@ if run_sim:
 
     sim_match_df = build_simulated_match_df(
         sim_paths=rep_paths,
+        server_sequences=server_sequences,
         p1=p1,
         p2=p2,
         player_a_name=sim_player
     )
 
-    sim_streaks_df = find_relaxed_streaks(
-        match_df=sim_match_df,
-        player_number=sim_player_number,
-        player_name=sim_player,
+    sim_streaks_df = calculate_simulated_streaks_for_scope(
+        sim_df=sim_match_df,
+        p1=p1,
+        p2=p2,
+        sim_player=sim_player,
         min_wins=min_length,
-        allowed_losses=allowed_losses
+        allowed_losses=allowed_losses,
+        scope=sim_scope
     )
 
     result_col1, result_col2, result_col3, result_col4 = st.columns(4)
@@ -995,6 +1192,19 @@ if run_sim:
     with result_col4:
         st.metric("P(Sim ≥ Actual)", f"{prob_at_least_actual:.3f}")
 
+    if int(n_sim) > 1:
+        hist_fig = make_simulation_histogram(
+            sim_counts=sim_counts,
+            actual_count=actual_sim_count
+        )
+
+        st.plotly_chart(hist_fig, use_container_width=True)
+    else:
+        st.info(
+            "Only one simulation was run, so the histogram is not very informative. "
+            "Increase the number of simulations to see the simulated streak-count distribution."
+        )
+
     sim_fig = make_simulated_point_plot(
         sim_df=sim_match_df,
         sim_streaks_df=sim_streaks_df,
@@ -1002,16 +1212,31 @@ if run_sim:
         p2=p2,
         player_a_name=sim_player,
         p=float(p_sim),
-        rep_count=rep_count
+        rep_count=rep_count,
+        simulation_model=simulation_model,
+        scope=sim_scope
     )
 
     st.plotly_chart(sim_fig, use_container_width=True)
 
-    st.caption(
-        f"Simulation note: Each simulated point is an independent Bernoulli trial for Player A "
-        f"with p = {p_sim:.2f}. The simulated match uses the same set lengths as the selected match, "
-        f"and streaks are counted using the same minimum wins ({min_length}) and allowed losses ({allowed_losses}) settings."
-    )
+    if simulation_model == "Serve-adjusted Bernoulli":
+        st.caption(
+            f"Simulation note: Each simulated point is an independent Bernoulli trial for Player A. "
+            f"The base probability is p = {p_sim:.2f}. The serve advantage is estimated from the "
+            f"overall server win rate across all matches in the dataset. When Player A served in the "
+            f"actual match's server sequence, the simulation used p + serve advantage = "
+            f"{min(max(p_sim + serve_advantage, 0), 1):.3f}. When Player A returned, it used "
+            f"p - serve advantage = {min(max(p_sim - serve_advantage, 0), 1):.3f}. "
+            f"The same set lengths and actual server sequence are preserved. Streaks are counted using "
+            f"minimum wins = {min_length}, allowed losses = {allowed_losses}, and scope = {sim_scope}."
+        )
+    else:
+        st.caption(
+            f"Simulation note: Each simulated point is an independent Bernoulli trial for Player A "
+            f"with p = {p_sim:.2f}. The simulated match uses the same set lengths as the selected match, "
+            f"and streaks are counted using minimum wins = {min_length}, allowed losses = {allowed_losses}, "
+            f"and scope = {sim_scope}."
+        )
 
 else:
     st.info("Click **Run Binomial Simulation** to generate simulation results.")
@@ -1019,7 +1244,6 @@ else:
 
 # ------------------------------------------------------------
 # Optional data tables
-# This block keeps the raw tables available for checking/debugging.
 # ------------------------------------------------------------
 with st.expander("View detected streaks table"):
     if streaks_df.empty:
