@@ -1,0 +1,109 @@
+---
+title: "Tennis Momentum Dashboard"
+output:
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: fill
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(ggplot2)
+library(shiny)
+library(flexdashboard)
+
+streaks <- readRDS("streaks.rds")
+```
+
+Sidebar {.sidebar}
+-------------------------------------
+
+```{r}
+selectInput(
+  "player",
+  "Select Player:",
+  choices = c("All", sort(unique(streaks$winner_name))),
+  selected = "All"
+)
+
+sliderInput(
+  "min_streak",
+  "Minimum Streak Length:",
+  min = 1,
+  max = max(streaks$streak_length, na.rm = TRUE),
+  value = 5,
+  step = 1
+)
+```
+
+Row
+-------------------------------------
+
+### Streak Distribution
+
+```{r}
+renderPlot({
+  data <- streaks
+  
+  if (input$player != "All") {
+    data <- data %>% filter(winner_name == input$player)
+  }
+  
+  ggplot(data, aes(x = streak_length)) +
+    geom_histogram(binwidth = 1) +
+    labs(
+      title = "Distribution of Streak Lengths",
+      x = "Streak Length",
+      y = "Frequency"
+    ) +
+    theme_minimal()
+})
+```
+
+### Long Streaks
+
+```{r}
+renderTable({
+  data <- streaks
+  
+  if (input$player != "All") {
+    data <- data %>% filter(winner_name == input$player)
+  }
+  
+  data %>%
+    filter(streak_length >= input$min_streak) %>%
+    arrange(desc(streak_length)) %>%
+    select(winner_name, streak_length, loser_name, match_id) %>%
+    head(15)
+})
+```
+
+Row
+-------------------------------------
+
+### Top Players by Average Streak
+
+```{r}
+renderPlot({
+  streaks %>%
+    group_by(winner_name) %>%
+    summarise(avg_streak = mean(streak_length), .groups = "drop") %>%
+    arrange(desc(avg_streak)) %>%
+    slice_head(n = 10) %>%
+    ggplot(aes(x = reorder(winner_name, avg_streak), y = avg_streak)) +
+    geom_col() +
+    coord_flip() +
+    labs(
+      title = "Top 10 Players by Average Streak",
+      x = "Player",
+      y = "Average Streak Length"
+    ) +
+    theme_minimal()
+})
+```
+
+### About
+
+This dashboard explores point-winning streaks in tennis.  
+Use the sidebar to filter by player and minimum streak length.

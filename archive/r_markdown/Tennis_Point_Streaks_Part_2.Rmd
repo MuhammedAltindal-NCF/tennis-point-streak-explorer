@@ -1,0 +1,861 @@
+---
+title: "Tennis_Point_Streaks_Part_2"
+author: "Muhammed Altindal"
+date: "2026-04-09"
+output:
+  html_document:
+    self_contained: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+rm(list = ls())
+library(dplyr)
+library(ggplot2)
+library(purrr)
+```
+
+```{r}
+points_clean <- readRDS("points_clean.rds")
+#points_clean
+
+colnames(points_clean)
+
+points_clean %>%
+  filter(match_id == "2011-frenchopen-1403") %>%
+  head(10)
+
+points_clean %>%
+  filter(match_id == "2011-frenchopen-1403") %>%
+  select(P1_name, P2_name) %>%
+  distinct()
+
+points_clean %>%
+  filter(match_id == "2011-frenchopen-1403") %>%
+  select(P1Score, P2Score) %>%
+  head(10)
+
+points_clean %>%
+  filter(match_id == "2011-frenchopen-1403") %>%
+  select(SetNo, GameNo, P1GamesWon, P2GamesWon) %>%
+  head(10)
+```
+
+```{r}
+selected_match_id <- "2011-frenchopen-1403"
+
+match_seq <- points_clean %>%
+  filter(match_id == selected_match_id) %>%
+  arrange(SetNo, GameNo, PointNumber) %>%
+  mutate(
+    point_index = row_number(),
+    murray_win = ifelse(PointWinnerName == "Andy Murray", 1, 0)
+  ) %>%
+  select(
+    point_index, match_id, SetNo, GameNo, PointNumber,
+    PointWinnerName, PointServerName, murray_win
+  )
+
+match_seq
+```
+
+```{r}
+points_clean %>%
+  filter(match_id == "2011-frenchopen-2149") %>%
+  select(
+    match_id, SetNo, GameNo, PointNumber,
+    P1_name, P2_name,
+    PointWinnerName, PointServerName
+  ) %>%
+  head(20)
+```
+
+
+```{r}
+colnames(match_seq)
+```
+
+```{r}
+match_seq <- match_seq %>%
+  mutate(
+    winner_y = ifelse(murray_win == 1, 1.00, 0.94),
+    
+    streak_break = ifelse(
+      row_number() == 1,
+      FALSE,
+      PointWinnerName != lag(PointWinnerName)
+    ),
+    
+    one_point_interruption = ifelse(
+      row_number() %in% c(1, n()),
+      FALSE,
+      lag(PointWinnerName) == lead(PointWinnerName) &
+        PointWinnerName != lag(PointWinnerName)
+    )
+  ) %>%
+  group_by(SetNo) %>%
+  mutate(
+    point_in_set = row_number()
+  ) %>%
+  ungroup()
+
+match_seq
+```
+
+```{r}
+game_summary <- match_seq %>%
+  group_by(SetNo, GameNo) %>%
+  summarise(
+    game_start = min(point_in_set),
+    game_end   = max(point_in_set),
+    server_name = first(PointServerName),
+    .groups = "drop"
+  )
+```
+
+
+```{r}
+match_seq <- match_seq %>%
+  mutate(
+    winner_y = ifelse(murray_win == 1, 1.00, 0.94)
+  ) %>%
+  group_by(SetNo) %>%
+  mutate(
+    point_in_set = row_number()
+  ) %>%
+  ungroup() %>%
+  mutate(
+    run_id = cumsum(
+      row_number() == 1 | PointWinnerName != lag(PointWinnerName)
+    )
+  ) %>%
+  group_by(run_id) %>%
+  mutate(
+    run_length = n()
+  ) %>%
+  ungroup() %>%
+  mutate(
+    prev_run_length = lag(run_length),
+    streak_break = ifelse(
+      row_number() == 1,
+      FALSE,
+      PointWinnerName != lag(PointWinnerName) & prev_run_length >= 2
+    ),
+    one_point_interruption = ifelse(
+      row_number() %in% c(1, n()),
+      FALSE,
+      lag(PointWinnerName) == lead(PointWinnerName) &
+        PointWinnerName != lag(PointWinnerName) &
+        prev_run_length >= 2
+    )
+  ) %>%
+  group_by(SetNo) %>%
+  arrange(point_in_set, .by_group = TRUE) %>%
+  mutate(
+    next_x = lead(point_in_set),
+    next_y = lead(winner_y)
+  ) %>%
+  ungroup()
+
+ggplot() +
+  geom_rect(
+    data = game_summary,
+    aes(
+      xmin = game_start - 0.5,
+      xmax = game_end + 0.5,
+      ymin = 0.92,
+      ymax = 1.02,
+      fill = server_name
+    ),
+    alpha = 0.15
+  ) +
+  geom_segment(
+    data = match_seq %>% filter(!is.na(next_x)),
+    aes(
+      x = point_in_set,
+      xend = next_x,
+      y = winner_y,
+      yend = next_y
+    ),
+    linewidth = 0.8,
+    color = "black"
+  ) +
+  geom_point(
+    data = match_seq,
+    aes(
+      x = point_in_set,
+      y = winner_y
+    ),
+    size = 2.2,
+    color = "black"
+  ) +
+  geom_point(
+    data = subset(match_seq, streak_break),
+    aes(
+      x = point_in_set,
+      y = winner_y
+    ),
+    shape = 4,
+    size = 3,
+    stroke = 1.1,
+    color = "black"
+  ) +
+  geom_point(
+    data = subset(match_seq, one_point_interruption),
+    aes(
+      x = point_in_set,
+      y = winner_y
+    ),
+    shape = 21,
+    size = 3.2,
+    stroke = 1,
+    fill = "yellow",
+    color = "black"
+  ) +
+  facet_grid(rows = vars(SetNo), scales = "free_x", space = "free_x") +
+  scale_y_continuous(
+    breaks = c(0.94, 1.00),
+    labels = c("Viktor Troicki", "Andy Murray"),
+    limits = c(0.92, 1.02)
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Andy Murray" = "#f4a3a3",
+      "Viktor Troicki" = "#a8c5f0"
+    )
+  ) +
+  labs(
+    title = paste("Andy Murray vs Viktor Troicki -", selected_match_id),
+    x = NULL,
+    y = NULL,
+    fill = "Server",
+    caption = "X = streak break | Yellow point = one-point interruption"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    strip.text.y = element_text(face = "bold"),
+    plot.caption = element_text(hjust = 0)
+  )
+```
+```{r}
+find_relaxed_streaks_prof <- function(x, min_length = 8, allowed_losses = 1) {
+  
+  n <- length(x)
+  
+  results <- data.frame(
+    streak_start_point = integer(),
+    streak_end_point = integer(),
+    points_won_in_streak = integer(),
+    points_lost_in_streak = integer(),
+    stringsAsFactors = FALSE
+  )
+  
+  start_idx <- 1
+  
+  while (start_idx <= n) {
+    
+    wins <- 0
+    losses <- 0
+    
+    best_end <- NA
+    best_wins <- NA
+    best_losses <- NA
+    
+    for (end_idx in start_idx:n) {
+      
+      if (x[end_idx] == 1) {
+        wins <- wins + 1
+      } else {
+        losses <- losses + 1
+      }
+      
+      if (losses > allowed_losses) break
+      
+      if (wins >= min_length) {
+        best_end <- end_idx
+        best_wins <- wins
+        best_losses <- losses
+      }
+    }
+    
+    if (is.na(best_end)) {
+      start_idx <- start_idx + 1
+    } else {
+      
+      results <- rbind(
+        results,
+        data.frame(
+          streak_start_point = start_idx,
+          streak_end_point = best_end,
+          points_won_in_streak = best_wins,
+          points_lost_in_streak = best_losses
+        )
+      )
+      
+      # jump to first loss inside streak
+      segment <- x[start_idx:best_end]
+      first_loss_pos <- which(segment == 0)[1]
+      
+      if (is.na(first_loss_pos)) {
+        start_idx <- best_end + 1
+      } else {
+        start_idx <- start_idx + first_loss_pos
+      }
+    }
+  }
+  
+  results %>%
+    mutate(
+      streak_length = streak_end_point - streak_start_point + 1
+    )
+}
+```
+
+```{r}
+basic_streaks <- find_relaxed_streaks_prof(
+  x = match_seq$murray_win,
+  min_length = 8,
+  allowed_losses = 1
+)
+
+basic_streaks
+```
+
+```{r}
+streak_overlay <- purrr::map_dfr(seq_len(nrow(basic_streaks)), function(i) {
+  
+  start_pt <- basic_streaks$streak_start_point[i]
+  end_pt   <- basic_streaks$streak_end_point[i]
+  
+  match_seq %>%
+    filter(point_index >= start_pt, point_index <= end_pt) %>%
+    arrange(point_index) %>%
+    mutate(streak_id = i)
+})
+```
+
+```{r}
+match_seq <- match_seq %>%
+  mutate(
+    winner_y = ifelse(murray_win == 1, 1.00, 0.94)
+  ) %>%
+  group_by(SetNo) %>%
+  mutate(
+    point_in_set = row_number()
+  ) %>%
+  ungroup() %>%
+  mutate(
+    run_id = cumsum(
+      row_number() == 1 | PointWinnerName != lag(PointWinnerName)
+    )
+  ) %>%
+  group_by(run_id) %>%
+  mutate(
+    run_length = n()
+  ) %>%
+  ungroup() %>%
+  mutate(
+    prev_run_length = lag(run_length),
+    streak_break = ifelse(
+      row_number() == 1,
+      FALSE,
+      PointWinnerName != lag(PointWinnerName) & prev_run_length >= 2
+    ),
+    one_point_interruption = ifelse(
+      row_number() %in% c(1, n()),
+      FALSE,
+      lag(PointWinnerName) == lead(PointWinnerName) &
+        PointWinnerName != lag(PointWinnerName) &
+        prev_run_length >= 2
+    )
+  ) %>%
+  group_by(SetNo) %>%
+  arrange(point_in_set, .by_group = TRUE) %>%
+  mutate(
+    next_x = lead(point_in_set),
+    next_y = lead(winner_y)
+  ) %>%
+  ungroup()
+
+game_summary <- match_seq %>%
+  group_by(SetNo, GameNo) %>%
+  summarise(
+    game_start = min(point_in_set),
+    game_end   = max(point_in_set),
+    server_name = first(PointServerName),
+    .groups = "drop"
+  )
+
+basic_streaks <- find_relaxed_streaks_prof(
+  x = match_seq$murray_win,
+  min_length = 8,
+  allowed_losses = 1
+)
+
+streak_overlay <- purrr::map_dfr(seq_len(nrow(basic_streaks)), function(i) {
+  start_pt <- basic_streaks$streak_start_point[i]
+  end_pt   <- basic_streaks$streak_end_point[i]
+
+  match_seq %>%
+    filter(point_index >= start_pt, point_index <= end_pt) %>%
+    arrange(point_index) %>%
+    mutate(streak_id = i)
+})
+
+set_labels <- data.frame(
+  SetNo = c(1, 2, 3, 4, 5),
+  label = c("Set 1: 6-3", "Set 2: 6-0", "Set 3: 6-3", "Set 4: 6-2", "Set 5: 7-5")
+)
+
+set_label_positions <- match_seq %>%
+  group_by(SetNo) %>%
+  summarise(
+    x = mean(range(point_in_set)),
+    .groups = "drop"
+  ) %>%
+  left_join(set_labels, by = "SetNo") %>%
+  mutate(y = 1.015)
+
+ggplot() +
+  geom_rect(
+    data = game_summary,
+    aes(
+      xmin = game_start - 0.5,
+      xmax = game_end + 0.5,
+      ymin = 0.92,
+      ymax = 1.02,
+      fill = server_name
+    ),
+    alpha = 0.15
+  ) +
+  geom_path(
+    data = streak_overlay,
+    aes(
+      x = point_in_set,
+      y = winner_y,
+      group = interaction(SetNo, streak_id)
+    ),
+    linewidth = 3.5,
+    color = "grey35",
+    alpha = 0.25,
+    lineend = "round"
+  ) +
+  geom_segment(
+    data = match_seq %>% filter(!is.na(next_x)),
+    aes(
+      x = point_in_set,
+      xend = next_x,
+      y = winner_y,
+      yend = next_y
+    ),
+    linewidth = 0.8,
+    color = "black"
+  ) +
+  geom_point(
+    data = match_seq,
+    aes(
+      x = point_in_set,
+      y = winner_y
+    ),
+    size = 2.2,
+    color = "black"
+  ) +
+  geom_point(
+    data = subset(match_seq, streak_break),
+    aes(
+      x = point_in_set,
+      y = winner_y
+    ),
+    shape = 4,
+    size = 3,
+    stroke = 1.1,
+    color = "black"
+  ) +
+  geom_point(
+    data = subset(match_seq, one_point_interruption),
+    aes(
+      x = point_in_set,
+      y = winner_y
+    ),
+    shape = 21,
+    size = 3.2,
+    stroke = 1,
+    fill = "yellow",
+    color = "black"
+  ) +
+  geom_text(
+    data = set_label_positions,
+    aes(
+      x = x,
+      y = y,
+      label = label
+    ),
+    size = 4,
+    fontface = "bold"
+  ) +
+  facet_grid(
+    rows = vars(SetNo),
+    scales = "free_x",
+    space = "free_x",
+    labeller = labeller(SetNo = function(x) paste("Set", x))
+  ) +
+  scale_y_continuous(
+    breaks = c(0.94, 1.00),
+    labels = c("Viktor Troicki", "Andy Murray"),
+    limits = c(0.92, 1.03)
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Andy Murray" = "#f4a3a3",
+      "Viktor Troicki" = "#a8c5f0"
+    )
+  ) +
+  labs(
+    title = paste("Andy Murray vs Viktor Troicki -", selected_match_id),
+    x = NULL,
+    y = NULL,
+    fill = "Server",
+    caption = "Grey overlay = identified streak | X = streak break | Yellow point = one-point interruption"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    strip.text.y = element_text(face = "bold"),
+    plot.caption = element_text(hjust = 0)
+  )
+```
+```{r}
+# --------------------------------------------------
+# 1) Select the match
+# --------------------------------------------------
+selected_match_id <- "2011-frenchopen-1403"
+
+match_points <- points_clean %>%
+  filter(match_id == selected_match_id) %>%
+  arrange(SetNo, GameNo, PointNumber)
+
+player_names <- unique(c(match_points$P1_name, match_points$P2_name))
+player_names <- player_names[!is.na(player_names)]
+
+murray_name <- player_names[grepl("Murray", player_names)][1]
+opponent_name <- player_names[player_names != murray_name][1]
+
+# --------------------------------------------------
+# 2) Build point-by-point match data
+# --------------------------------------------------
+match_seq <- match_points %>%
+  mutate(
+    point_index = row_number(),
+    murray_win = ifelse(PointWinnerName == murray_name, 1, 0),
+    winner_y = ifelse(murray_win == 1, 1.00, 0.94)
+  ) %>%
+  group_by(SetNo) %>%
+  mutate(
+    point_in_set = row_number()
+  ) %>%
+  ungroup() %>%
+  mutate(
+    run_id = cumsum(row_number() == 1 | PointWinnerName != lag(PointWinnerName))
+  ) %>%
+  group_by(run_id) %>%
+  mutate(
+    run_length = n()
+  ) %>%
+  ungroup() %>%
+  mutate(
+    prev_run_length = lag(run_length),
+    streak_break = ifelse(
+      row_number() == 1,
+      FALSE,
+      PointWinnerName != lag(PointWinnerName) & prev_run_length >= 2
+    ),
+    one_point_interruption = ifelse(
+      row_number() %in% c(1, n()),
+      FALSE,
+      lag(PointWinnerName) == lead(PointWinnerName) &
+        PointWinnerName != lag(PointWinnerName) &
+        prev_run_length >= 2
+    )
+  ) %>%
+  group_by(SetNo) %>%
+  arrange(point_in_set, .by_group = TRUE) %>%
+  mutate(
+    next_x = lead(point_in_set),
+    next_y = lead(winner_y)
+  ) %>%
+  ungroup()
+
+# --------------------------------------------------
+# 3) Relaxed streak function
+#    Allows one-point interruption inside a long streak
+# --------------------------------------------------
+find_relaxed_streaks_prof <- function(x, min_length = 8, allowed_losses = 1) {
+  
+  n <- length(x)
+  
+  results <- data.frame(
+    streak_start_point = integer(),
+    streak_end_point = integer(),
+    points_won_in_streak = integer(),
+    points_lost_in_streak = integer()
+  )
+  
+  start_idx <- 1
+  
+  while (start_idx <= n) {
+    wins <- 0
+    losses <- 0
+    
+    best_end <- NA
+    best_wins <- NA
+    best_losses <- NA
+    
+    for (end_idx in start_idx:n) {
+      if (x[end_idx] == 1) {
+        wins <- wins + 1
+      } else {
+        losses <- losses + 1
+      }
+      
+      if (losses > allowed_losses) break
+      
+      if (wins >= min_length) {
+        best_end <- end_idx
+        best_wins <- wins
+        best_losses <- losses
+      }
+    }
+    
+    if (is.na(best_end)) {
+      start_idx <- start_idx + 1
+    } else {
+      results <- rbind(
+        results,
+        data.frame(
+          streak_start_point = start_idx,
+          streak_end_point = best_end,
+          points_won_in_streak = best_wins,
+          points_lost_in_streak = best_losses
+        )
+      )
+      
+      segment <- x[start_idx:best_end]
+      first_loss_pos <- which(segment == 0)[1]
+      
+      if (is.na(first_loss_pos)) {
+        start_idx <- best_end + 1
+      } else {
+        start_idx <- start_idx + first_loss_pos
+      }
+    }
+  }
+  
+  results %>%
+    mutate(
+      streak_length = streak_end_point - streak_start_point + 1
+    )
+}
+
+# Find relaxed streaks
+basic_streaks <- find_relaxed_streaks_prof(
+  x = match_seq$murray_win,
+  min_length = 8,
+  allowed_losses = 1
+)
+
+# --------------------------------------------------
+# 4) Build streak overlay data for plotting
+# --------------------------------------------------
+streak_overlay <- purrr::map_dfr(seq_len(nrow(basic_streaks)), function(i) {
+  start_pt <- basic_streaks$streak_start_point[i]
+  end_pt   <- basic_streaks$streak_end_point[i]
+  
+  match_seq %>%
+    filter(point_index >= start_pt, point_index <= end_pt) %>%
+    arrange(point_index) %>%
+    mutate(streak_id = i)
+})
+
+# --------------------------------------------------
+# 5) Game summary for serve shading
+# --------------------------------------------------
+game_summary <- match_seq %>%
+  group_by(SetNo, GameNo) %>%
+  summarise(
+    game_start = min(point_in_set),
+    game_end   = max(point_in_set),
+    server_name = first(PointServerName),
+    .groups = "drop"
+  )
+
+# --------------------------------------------------
+# 6) Set labels and set scores
+# --------------------------------------------------
+set_scores <- match_points %>%
+  group_by(SetNo, GameNo) %>%
+  summarise(
+    p1_games = max(P1GamesWon, na.rm = TRUE),
+    p2_games = max(P2GamesWon, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  group_by(SetNo) %>%
+  summarise(
+    p1_games = max(p1_games, na.rm = TRUE),
+    p2_games = max(p2_games, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    set_score = paste0(p1_games, "-", p2_games)
+  )
+
+set_label_positions <- match_seq %>%
+  group_by(SetNo) %>%
+  summarise(
+    x = mean(range(point_in_set)),
+    .groups = "drop"
+  ) %>%
+  left_join(set_scores, by = "SetNo") %>%
+  mutate(
+    y = 1.015,
+    label = paste0("Set ", SetNo, ": ", set_score)
+  )
+
+# --------------------------------------------------
+# 7) Plot
+# --------------------------------------------------
+ggplot() +
+  geom_rect(
+    data = game_summary,
+    aes(
+      xmin = game_start - 0.5,
+      xmax = game_end + 0.5,
+      ymin = 0.92,
+      ymax = 1.02,
+      fill = server_name
+    ),
+    alpha = 0.15
+  ) +
+  geom_path(
+    data = streak_overlay,
+    aes(
+      x = point_in_set,
+      y = winner_y,
+      group = interaction(SetNo, streak_id)
+    ),
+    linewidth = 4,
+    color = "grey35",
+    alpha = 0.35,
+    lineend = "round"
+  ) +
+  geom_segment(
+    data = match_seq %>% filter(!is.na(next_x)),
+    aes(
+      x = point_in_set,
+      xend = next_x,
+      y = winner_y,
+      yend = next_y
+    ),
+    linewidth = 0.8,
+    color = "black"
+  ) +
+  geom_point(
+    data = match_seq,
+    aes(
+      x = point_in_set,
+      y = winner_y
+    ),
+    size = 2.2,
+    color = "black"
+  ) +
+  geom_point(
+    data = subset(match_seq, streak_break),
+    aes(
+      x = point_in_set,
+      y = winner_y
+    ),
+    shape = 4,
+    size = 3,
+    stroke = 1.1,
+    color = "black"
+  ) +
+  geom_point(
+    data = subset(match_seq, one_point_interruption),
+    aes(
+      x = point_in_set,
+      y = winner_y
+    ),
+    shape = 21,
+    size = 3.2,
+    stroke = 1,
+    fill = "yellow",
+    color = "black"
+  ) +
+  geom_text(
+    data = set_label_positions,
+    aes(
+      x = x,
+      y = y,
+      label = label
+    ),
+    size = 4,
+    fontface = "bold"
+  ) +
+  facet_grid(
+    rows = vars(SetNo),
+    scales = "free_x",
+    space = "free_x",
+    labeller = labeller(SetNo = function(x) paste("Set", x))
+  ) +
+  scale_y_continuous(
+    breaks = c(0.94, 1.00),
+    labels = c(opponent_name, murray_name),
+    limits = c(0.92, 1.03)
+  ) +
+  scale_fill_manual(
+    values = setNames(c("#a8c5f0", "#f4a3a3"), c(opponent_name, murray_name))
+  ) +
+  labs(
+    title = paste(murray_name, "vs", opponent_name, "-", selected_match_id),
+    x = NULL,
+    y = NULL,
+    fill = "Server",
+    caption = "Grey overlay = identified relaxed streaks | X = streak break | Yellow point = one-point interruption"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    strip.text.y = element_text(face = "bold"),
+    plot.caption = element_text(hjust = 0)
+  )
+
+# Optional: view detected streaks
+basic_streaks
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,643 @@
+---
+title: "Statistics Research Project: Tennis Point Streaks"
+author: "Muhammed Altindal"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    self_contained: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+rm(list = ls())
+library(dplyr)
+library(ggplot2)
+```
+
+# Introduction
+
+The goal of this project is to study short-term momentum in tennis by examining sequences of consecutive points won by the same player. Using point-by-point data, I focus on identifying and describing winning streaks within matches. The main purpose is descriptive: to see how long these streaks tend to be, whether long streaks are rare, and how streak patterns vary across matches and players.
+
+# Loading the Data
+
+```{r}
+matches <- read.csv("2011-frenchopen-matches.csv", stringsAsFactors = FALSE)
+points  <- read.csv("2011-frenchopen-points.csv", stringsAsFactors = FALSE)
+```
+
+# Initial Inspection
+
+Before constructing point-winning streaks, I first inspect the structure of both datasets.
+
+```{r}
+dim(matches)
+dim(points)
+
+names(matches)
+names(points)
+
+str(matches)
+str(points)
+```
+
+# Data Preparation
+
+To analyze point-winning streaks, I attached player names to each point by joining the points dataset with the matches dataset using `match_id`. Then I create readable player-name variables for both the point winner and the point server.
+
+```{r}
+matches_small <- matches %>%
+  select(match_id, player1, player2) %>%
+  rename(
+    P1_name = player1,
+    P2_name = player2
+  )
+
+points_named <- points %>%
+  left_join(matches_small, by = "match_id") %>%
+  mutate(
+    PointWinnerName = case_when(
+      PointWinner == 1 ~ P1_name,
+      PointWinner == 2 ~ P2_name,
+      TRUE ~ NA_character_
+    ),
+    PointServerName = case_when(
+      PointServer == 1 ~ P1_name,
+      PointServer == 2 ~ P2_name,
+      TRUE ~ NA_character_
+    )
+  )
+
+```
+
+# The cleaning step
+
+In this step, I cleaned the point-level dataset by keeping only valid observations where a point was actually played. I remove rows with invalid winner codes and exclude non-point records (such as match-start rows) by filtering out zero or missing point numbers. Finally, I sorted the data within each match to ensure that points are in the correct chronological order for streak analysis.
+
+```{r}
+points_clean <- points_named %>%
+  filter(PointWinner %in% c(1, 2)) %>%      # keep only actual point winners
+  filter(!is.na(PointNumber)) %>%           # remove missing point numbers
+  filter(PointNumber > 0) %>%               # remove match-start / non-point rows
+  filter(!is.na(match_id)) %>%
+  arrange(match_id, SetNo, GameNo, PointNumber)
+```
+
+#Arranging winning player column
+
+```{r}
+points_clean <- points_named %>%
+  filter(PointWinner %in% c(1, 2)) %>%
+  filter(!is.na(PointNumber)) %>%
+  filter(PointNumber > 0) %>%
+  filter(!is.na(match_id)) %>%
+  mutate(
+    PointWinnerName = case_when(
+      PointWinner == 1 ~ P1_name,
+      PointWinner == 2 ~ P2_name
+    ),
+    PointServerName = case_when(
+      PointServer == 1 ~ P1_name,
+      PointServer == 2 ~ P2_name
+    )
+  ) %>%
+  arrange(match_id, SetNo, GameNo, PointNumber)
+
+points_clean <- points_clean %>%
+  relocate(PointWinnerName, .after = PointWinner) %>%
+  relocate(PointServerName, .after = PointServer)
+
+#points_clean
+```
+
+# Data Quality Checks
+
+Before constructing streaks, I check whether the merge worked properly, whether the winner/server codes look valid, whether any point records are duplicated, and whether the cleaned dataset contains missing player names.
+
+#Is NA? 
+```{r}
+sum(is.na(points_named$P1_name))
+sum(is.na(points_named$P2_name))
+```
+
+
+```{r}
+table(points$PointWinner, useNA = "ifany")
+table(points$PointServer, useNA = "ifany")
+```
+The raw point data mainly uses `1` and `2` as expected, but it also contains some `0` values and a small number of missing values. This suggests that the dataset includes a few non-point or incomplete rows, which were removed during data cleaning.
+
+```{r}
+sum(is.na(points_clean$PointWinnerName))
+sum(is.na(points_clean$PointServerName))
+```
+
+#Duplicate check
+
+```{r}
+duplicate_points_raw <- points %>%
+  count(match_id, SetNo, GameNo, PointNumber) %>%
+  filter(n > 1)
+
+duplicate_points_raw
+nrow(duplicate_points_raw)
+```
+#Inspecting point ordering
+
+```{r}
+example_match <- points_clean$match_id[1]
+
+points_clean %>%
+  filter(match_id == example_match) %>%
+  select(match_id, SetNo, GameNo, PointNumber, PointWinner, PointWinnerName) %>%
+  head(30)
+```
+
+
+```{r}
+n_total   <- nrow(points_named)
+n_clean   <- nrow(points_clean)
+n_removed <- n_total - n_clean
+pct_removed <- round(100 * n_removed / n_total, 2)
+
+n_total
+n_clean
+n_removed
+pct_removed
+```
+Only a very small proportion of observations (approximately 0.57%) were removed during cleaning, indicating that the raw dataset was largely complete and consistent.
+
+# Constructing Point-Winning Streaks
+
+To identify streaks, I group the cleaned data by match and then mark a new streak whenever the point winner changes from one point to the next. Consecutive points won by the same player are assigned the same streak ID.
+
+```{r}
+streaks <- points_clean %>%
+  group_by(match_id) %>%
+  mutate(
+    new_streak = ifelse(
+      row_number() == 1, 1,
+      ifelse(PointWinner != lag(PointWinner), 1, 0)
+    ),
+    streak_id = cumsum(new_streak)
+  ) %>%
+  group_by(match_id, streak_id) %>%
+  summarise(
+    winner_code   = first(PointWinner),
+    winner_name   = first(PointWinnerName),
+    P1_name       = first(P1_name),
+    P2_name       = first(P2_name),
+    streak_length = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    loser_name = ifelse(winner_name == P1_name, P2_name, P1_name)
+  )
+```
+
+#After constructing the streaks, I check whether the results look reasonable.
+
+```{r}
+summary(streaks$streak_length)
+table(streaks$streak_length)
+
+sum(is.na(streaks$winner_name))
+sum(is.na(streaks$loser_name))
+
+streaks %>%
+  filter(streak_length <= 0)
+streaks
+```
+Streak lengths should always be positive. Missing player names or zero-length streaks would indicate a problem in the construction process.
+
+#The following output summarizes the distribution of streak lengths.
+
+```{r}
+streaks %>%
+  summarise(
+    Number_of_streaks = n(),
+    Mean_streak_length = mean(streak_length),
+    Median_streak_length = median(streak_length),
+    Max_streak_length = max(streak_length)
+  )
+```
+
+#To visualize the distribution of streak lengths, I begin with a histogram.
+
+```{r}
+ggplot(streaks, aes(x = streak_length)) +
+  geom_histogram(binwidth = 1, boundary = 0, closed = "left") +
+  labs(
+    title = "Distribution of Point-Winning Streak Lengths",
+    x = "Streak Length",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+## Added a boxplot
+
+```{r}
+ggplot(streaks, aes(y = streak_length)) +
+  geom_boxplot() +
+  labs(
+    title = "Boxplot of Point-Winning Streak Lengths",
+    y = "Streak Length"
+  ) +
+  theme_minimal()
+```
+
+# Inspecting Long Streaks
+
+Long streaks may be especially interesting because they could reflect strong short-term momentum or unusual game situations.
+
+```{r}
+long_streaks <- streaks %>%
+  filter(streak_length >= 6) %>%
+  arrange(desc(streak_length)) %>%
+  relocate(streak_length, .after = winner_name)
+
+long_streaks
+```
+
+Here, I identify and examine long point-winning streaks to explore whether unusually long sequences may indicate short-term momentum.
+
+Tennis point outcomes show some clustering (streaks), but most streaks are short, suggesting limited evidence of strong momentum effects.
+
+
+
+```{r}
+saveRDS(streaks, "streaks.rds")
+```
+
+# PART 2
+
+Creating graph, looking for longest streak match. 
+
+```{r}
+sharapova_longest <- streaks %>%
+  filter(winner_name == "Maria Sharapova") %>%
+  arrange(desc(streak_length))
+
+sharapova_longest
+```
+
+```{r}
+sharapova_top_match <- sharapova_longest %>%
+  slice(1)
+
+sharapova_top_match
+```
+```{r}
+selected_match_id <- "2011-frenchopen-2149"
+
+match_plot_data <- points_clean %>%
+  filter(match_id == selected_match_id) %>%
+  mutate(
+    point_index = row_number(),
+    winner_y = ifelse(PointWinner == 1, 1, 0),
+    server_y = ifelse(PointServer == 1, 1, 0),
+    server_won = PointWinner == PointServer,
+    streak_break = ifelse(row_number() == 1, FALSE, PointWinner != lag(PointWinner))
+  ) %>%
+  mutate(
+    one_point_interruption = ifelse(
+      row_number() %in% c(1, n()), FALSE,
+      lag(PointWinner) == lead(PointWinner) & PointWinner != lag(PointWinner)
+    )
+  )
+```
+
+```{r}
+match_plot_data %>%
+  select(P1_name, P2_name) %>%
+  distinct()
+```
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# 1) Find the match in which Maria Sharapova has her longest streak
+sharapova_longest <- streaks %>%
+  filter(winner_name == "Maria Sharapova") %>%
+  arrange(desc(streak_length))
+
+sharapova_top_match <- sharapova_longest %>%
+  slice(1)
+
+selected_match_id <- sharapova_top_match$match_id[1]
+
+# 2) Prepare point-level data for the selected match
+match_plot_data <- points_clean %>%
+  filter(match_id == selected_match_id) %>%
+  arrange(SetNo, GameNo, PointNumber) %>%
+  mutate(
+    point_index = row_number(),
+    winner_y = ifelse(PointWinner == 1, 1.00, 0.94),
+    point_score = paste0(P1Score, "-", P2Score),
+    streak_break = ifelse(row_number() == 1, FALSE, PointWinner != lag(PointWinner))
+  ) %>%
+  mutate(
+    one_point_interruption = ifelse(
+      row_number() %in% c(1, n()),
+      FALSE,
+      lag(PointWinner) == lead(PointWinner) & PointWinner != lag(PointWinner)
+    ),
+    next_x = lead(point_index),
+    next_y = lead(winner_y)
+  )
+
+# 3) Extract player labels
+p1_label <- unique(match_plot_data$P1_name)
+p2_label <- unique(match_plot_data$P2_name)
+
+# 4) Create game-level summary for serve blocks and game scores
+game_summary <- match_plot_data %>%
+  group_by(SetNo, GameNo) %>%
+  summarise(
+    game_start = min(point_index),
+    game_end   = max(point_index),
+    game_mid   = (game_start + game_end) / 2,
+    server_name = first(PointServerName),
+    p1_games = max(P1GamesWon),
+    p2_games = max(P2GamesWon),
+    game_score = paste0(p1_games, "-", p2_games),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    serve_label = ifelse(server_name == p1_label, "P1 serve", "P2 serve")
+  )
+
+# 5) Create set-level summary for final set scores
+set_summary <- match_plot_data %>%
+  group_by(SetNo) %>%
+  summarise(
+    set_start = min(point_index),
+    set_end   = max(point_index),
+    set_mid   = (set_start + set_end) / 2,
+    p1_games = max(P1GamesWon),
+    p2_games = max(P2GamesWon),
+    n_games = n_distinct(GameNo),
+    set_score = paste0(p1_games, "-", p2_games),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    set_label = paste0(
+      "Set ", SetNo,
+      " (Games 1-", n_games, "): ",
+      set_score
+    )
+  )
+
+# 6) Add an initial 0-0 score label
+initial_score <- data.frame(
+  x = min(match_plot_data$point_index),
+  y = 0.905,
+  label = "0-0"
+)
+
+# 7) Build the plot
+ggplot() +
+  
+  # Serve blocks by game
+  geom_rect(
+    data = game_summary,
+    aes(
+      xmin = game_start - 0.5,
+      xmax = game_end + 0.5,
+      ymin = 0.925,
+      ymax = 1.015,
+      fill = server_name
+    ),
+    alpha = 0.12
+  ) +
+  
+  # Segments connecting each point to the next point
+  geom_segment(
+    data = match_plot_data %>% filter(!is.na(next_x)),
+    aes(
+      x = point_index,
+      xend = next_x,
+      y = winner_y,
+      yend = next_y,
+      color = PointWinnerName
+    ),
+    linewidth = 1
+  ) +
+  
+  # Winner points
+  geom_point(
+    data = match_plot_data,
+    aes(x = point_index, y = winner_y, color = PointWinnerName),
+    size = 2.2
+  ) +
+  
+  # Mark streak breaks with X
+  geom_point(
+    data = subset(match_plot_data, streak_break),
+    aes(x = point_index, y = winner_y),
+    shape = 4,
+    size = 3,
+    stroke = 1.1,
+    color = "black"
+  ) +
+  
+  # Mark one-point interruptions with yellow points
+  geom_point(
+    data = subset(match_plot_data, one_point_interruption),
+    aes(x = point_index, y = winner_y),
+    shape = 21,
+    size = 3.2,
+    stroke = 1,
+    fill = "yellow",
+    color = "black"
+  ) +
+  
+  # Point-by-point tennis score labels
+  geom_text(
+    data = match_plot_data,
+    aes(x = point_index, y = 0.915, label = point_score),
+    size = 2.2,
+    angle = 90,
+    vjust = 0.5,
+    color = "gray25"
+  ) +
+  
+  # Dashed vertical lines for game boundaries
+  geom_vline(
+    data = game_summary,
+    aes(xintercept = game_end + 0.5),
+    linetype = "dashed",
+    color = "gray50",
+    linewidth = 0.4
+  ) +
+  
+  # Game score labels
+  geom_text(
+    data = game_summary,
+    aes(x = game_mid, y = 0.905, label = game_score),
+    size = 3.2,
+    fontface = "bold"
+  ) +
+  
+  # Initial 0-0 score
+  geom_text(
+    data = initial_score,
+    aes(x = x - 1, y = y, label = label),
+    size = 3.2,
+    fontface = "bold"
+  ) +
+  
+  # Serve labels at the top of each game
+  geom_text(
+    data = game_summary,
+    aes(x = game_mid, y = 1.02, label = serve_label),
+    size = 3
+  ) +
+  
+  # Solid vertical lines for set boundaries
+  geom_vline(
+    data = set_summary,
+    aes(xintercept = set_end + 0.5),
+    linetype = "solid",
+    color = "black",
+    linewidth = 0.6
+  ) +
+  
+  # Set labels at the very top
+  geom_text(
+    data = set_summary,
+    aes(
+      x = set_mid,
+      y = 1.045,
+      label = set_label
+    ),
+    size = 4,
+    fontface = "bold"
+  ) +
+  
+  scale_y_continuous(
+    breaks = c(0.94, 1.00),
+    labels = c(p2_label, p1_label),
+    limits = c(0.90, 1.055)
+  ) +
+  
+  labs(
+    title = paste("Point Sequence with Serve Context:", selected_match_id),
+    x = NULL,
+    y = NULL,
+    color = "Point Winner",
+    fill = "Server",
+    caption = "X = Streak break (change in point winner)   |   Yellow point = One-point interruption (temporary break in streak)"
+  ) +
+  
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.caption = element_text(size = 10, hjust = 0)
+  )
+```
+#Hypothesis thinking part
+
+```{r}
+observed_match <- match_plot_data %>%
+  select(point_index, PointServer, PointWinner)
+
+observed_streaks <- observed_match %>%
+  mutate(
+    new_streak = ifelse(
+      row_number() == 1,
+      1,
+      ifelse(PointWinner != lag(PointWinner), 1, 0)
+    ),
+    streak_id = cumsum(new_streak)
+  ) %>%
+  group_by(streak_id) %>%
+  summarise(
+    streak_length = n(),
+    .groups = "drop"
+  )
+
+observed_max_streak <- max(observed_streaks$streak_length)
+observed_n_long6 <- sum(observed_streaks$streak_length >= 6)
+
+observed_max_streak
+observed_n_long6
+```
+
+#guessing/finding serve advantage
+
+```{r}
+p_server_match <- mean(match_plot_data$PointWinner == match_plot_data$PointServer)
+p_server_match
+```
+#simulated match
+```{r}
+simulate_match_winners <- function(server_vector, p_server) {
+  simulated_winner <- sapply(server_vector, function(s) {
+    server_wins <- rbinom(1, 1, p_server)
+    if (server_wins == 1) {
+      return(s)
+    } else {
+      return(ifelse(s == 1, 2, 1))
+    }
+  })
+  
+  return(simulated_winner)
+}
+```
+
+#smilated streak statistics
+```{r}
+get_streak_stats <- function(winner_vector) {
+  streak_df <- data.frame(PointWinner = winner_vector) %>%
+    mutate(
+      new_streak = ifelse(
+        row_number() == 1,
+        1,
+        ifelse(PointWinner != lag(PointWinner), 1, 0)
+      ),
+      streak_id = cumsum(new_streak)
+    ) %>%
+    group_by(streak_id) %>%
+    summarise(
+      streak_length = n(),
+      .groups = "drop"
+    )
+  
+  c(
+    max_streak = max(streak_df$streak_length),
+    n_long6 = sum(streak_df$streak_length >= 6),
+    mean_streak = mean(streak_df$streak_length)
+  )
+}
+```
+
+#Runninf for 1000 times 
+```{r}
+set.seed(123)
+
+server_vector <- observed_match$PointServer
+n_sim <- 1000
+
+sim_matrix <- replicate(n_sim, {
+  sim_winners <- simulate_match_winners(server_vector, p_server_match)
+  get_streak_stats(sim_winners)
+})
+
+sim_results <- as.data.frame(t(sim_matrix))
+#sim_results
+```
+#p-value of simulations
+```{r}
+p_value_max <- mean(sim_results$max_streak >= observed_max_streak)
+p_value_long6 <- mean(sim_results$n_long6 >= observed_n_long6)
+
+p_value_max
+p_value_long6
+```
+The observed maximum streak is significantly larger than expected under a serve-adjusted chance model.
+Long streak counts are somewhat unusual, but not strongly significant at the 5% level
+
+The observed match contains an unusually long maximum streak that is unlikely under a serve-adjusted chance model. However, the total number of long streaks (length ≥ 6) is not strongly significant. This suggests that the match includes one especially extreme run, rather than a broad overall excess of long streaks.
+

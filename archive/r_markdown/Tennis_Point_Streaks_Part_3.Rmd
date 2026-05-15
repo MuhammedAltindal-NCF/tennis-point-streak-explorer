@@ -1,0 +1,519 @@
+---
+title: "Tennis_Point_Streaks_Part_3"
+author: "Muhammed Altindal"
+date: "2026-04-16"
+output:
+  html_document:
+    self_contained: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(purrr)
+library(readr)
+library(tidyr)
+
+# =========================================================
+# 0) LOAD DATA
+# =========================================================
+points_clean <- readRDS("points_clean.rds")
+
+# Tableau'da seçenek olarak kullanılacak parametre grid'i
+min_length_values <- 3:10
+allowed_losses_values <- 0:3
+
+param_grid <- expand_grid(
+  min_length = min_length_values,
+  allowed_losses = allowed_losses_values
+)
+
+# =========================================================
+# 1) RELAXED STREAK FUNCTION
+# =========================================================
+find_relaxed_streaks_prof <- function(x, min_length = 8, allowed_losses = 1) {
+  
+  n <- length(x)
+  
+  results <- data.frame(
+    streak_start_point = integer(),
+    streak_end_point = integer(),
+    points_won_in_streak = integer(),
+    points_lost_in_streak = integer()
+  )
+  
+  start_idx <- 1
+  
+  while (start_idx <= n) {
+    
+    # NEW RULE:
+    # The streak must start with a point won by the streaking player.
+    if (x[start_idx] != 1) {
+      start_idx <- start_idx + 1
+      next
+    }
+    
+    wins <- 0
+    losses <- 0
+    
+    best_end <- NA
+    best_wins <- NA
+    best_losses <- NA
+    
+    for (end_idx in start_idx:n) {
+      if (x[end_idx] == 1) {
+        wins <- wins + 1
+      } else {
+        losses <- losses + 1
+      }
+      
+      if (losses > allowed_losses) break
+      
+      if (wins >= min_length) {
+        best_end <- end_idx
+        best_wins <- wins
+        best_losses <- losses
+      }
+    }
+    
+    if (is.na(best_end)) {
+      start_idx <- start_idx + 1
+    } else {
+      results <- rbind(
+        results,
+        data.frame(
+          streak_start_point = start_idx,
+          streak_end_point = best_end,
+          points_won_in_streak = best_wins,
+          points_lost_in_streak = best_losses
+        )
+      )
+      
+      segment <- x[start_idx:best_end]
+      first_loss_pos <- which(segment == 0)[1]
+      
+      if (is.na(first_loss_pos)) {
+        start_idx <- best_end + 1
+      } else {
+        start_idx <- start_idx + first_loss_pos
+      }
+    }
+  }
+  
+  if (nrow(results) == 0) {
+    return(tibble())
+  }
+  
+  as_tibble(results) %>%
+    mutate(
+      streak_length = streak_end_point - streak_start_point + 1
+    )
+}
+# =========================================================
+# 2) BUILD MATCH-LEVEL POINT SEQUENCE
+#    This is the main table behind the black line / points
+# =========================================================
+build_match_seq <- function(match_df) {
+  
+  match_df <- match_df %>%
+    arrange(SetNo, GameNo, PointNumber) %>%
+    mutate(point_index = row_number())
+  
+  p1_name <- first(match_df$P1_name)
+  p2_name <- first(match_df$P2_name)
+  
+  match_seq <- match_df %>%
+    mutate(
+      winner_y = case_when(
+        PointWinnerName == p1_name ~ 1.00,
+        PointWinnerName == p2_name ~ 0.94,
+        TRUE ~ NA_real_
+      )
+    ) %>%
+    group_by(SetNo) %>%
+    mutate(
+      point_in_set = row_number()
+    ) %>%
+    ungroup() %>%
+    mutate(
+      run_id = cumsum(row_number() == 1 | PointWinnerName != lag(PointWinnerName))
+    ) %>%
+    group_by(run_id) %>%
+    mutate(
+      run_length = n()
+    ) %>%
+    ungroup() %>%
+    mutate(
+      prev_run_length = lag(run_length),
+      streak_break = ifelse(
+        row_number() == 1,
+        FALSE,
+        PointWinnerName != lag(PointWinnerName) & prev_run_length >= 2
+      ),
+      one_point_interruption = ifelse(
+        row_number() %in% c(1, n()),
+        FALSE,
+        lag(PointWinnerName) == lead(PointWinnerName) &
+          PointWinnerName != lag(PointWinnerName) &
+          prev_run_length >= 2
+      )
+    ) %>%
+    group_by(SetNo) %>%
+    arrange(point_in_set, .by_group = TRUE) %>%
+    mutate(
+      next_x = lead(point_in_set),
+      next_y = lead(winner_y)
+    ) %>%
+    ungroup()
+  
+  match_seq
+}
+
+# =========================================================
+# 3) GAME SUMMARY
+#    For server shading in Tableau
+# =========================================================
+build_game_summary <- function(match_seq) {
+  match_seq %>%
+    group_by(match_id, SetNo, GameNo) %>%
+    summarise(
+      game_start = min(point_in_set),
+      game_end = max(point_in_set),
+      server_name = first(PointServerName),
+      .groups = "drop"
+    )
+}
+
+# =========================================================
+# 4) BUILD STREAK TABLES FOR ONE PLAYER IN ONE MATCH
+# =========================================================
+build_player_streak_outputs <- function(match_seq, player_name, param_grid) {
+  
+  player_seq <- match_seq %>%
+    mutate(
+      player_name = player_name,
+      player_win = ifelse(PointWinnerName == player_name, 1L, 0L)
+    )
+  
+  # -------------------------------
+  # A) streak summary table
+  # -------------------------------
+  streaks_table <- map_dfr(seq_len(nrow(param_grid)), function(i) {
+    
+    min_len_i <- param_grid$min_length[i]
+    allowed_i <- param_grid$allowed_losses[i]
+    
+    basic_streaks <- find_relaxed_streaks_prof(
+      x = player_seq$player_win,
+      min_length = min_len_i,
+      allowed_losses = allowed_i
+    )
+    
+    if (nrow(basic_streaks) == 0) {
+      return(tibble())
+    }
+    
+    basic_streaks %>%
+      mutate(
+        match_id = first(player_seq$match_id),
+        player_name = player_name,
+        min_length = min_len_i,
+        allowed_losses = allowed_i,
+        streak_id = row_number(),
+        duration_points = streak_end_point - streak_start_point + 1
+      )
+  })
+  
+  if (nrow(streaks_table) == 0) {
+    return(list(
+      streaks_table = tibble(),
+      streak_overlay_table = tibble(),
+      markers_table = tibble()
+    ))
+  }
+  
+  start_info <- player_seq %>%
+    select(
+      point_index,
+      start_SetNo = SetNo,
+      start_GameNo = GameNo,
+      start_point_in_set = point_in_set
+    )
+  
+  end_info <- player_seq %>%
+    select(
+      point_index,
+      end_SetNo = SetNo,
+      end_GameNo = GameNo,
+      end_point_in_set = point_in_set
+    )
+  
+  streaks_table <- streaks_table %>%
+    left_join(start_info, by = c("streak_start_point" = "point_index")) %>%
+    left_join(end_info, by = c("streak_end_point" = "point_index")) %>%
+    select(
+      match_id,
+      player_name,
+      min_length,
+      allowed_losses,
+      streak_id,
+      streak_start_point,
+      streak_end_point,
+      start_SetNo,
+      start_GameNo,
+      start_point_in_set,
+      end_SetNo,
+      end_GameNo,
+      end_point_in_set,
+      points_won_in_streak,
+      points_lost_in_streak,
+      streak_length,
+      duration_points
+    )
+  
+  # -------------------------------
+  # B) point-level overlay table
+  # -------------------------------
+  streak_overlay_table <- map_dfr(seq_len(nrow(streaks_table)), function(i) {
+    
+    start_pt <- streaks_table$streak_start_point[i]
+    end_pt   <- streaks_table$streak_end_point[i]
+    
+    player_seq %>%
+      filter(point_index >= start_pt, point_index <= end_pt) %>%
+      arrange(point_index) %>%
+      transmute(
+        match_id,
+        player_name = player_name,
+        min_length = streaks_table$min_length[i],
+        allowed_losses = streaks_table$allowed_losses[i],
+        streak_id = streaks_table$streak_id[i],
+        SetNo,
+        GameNo,
+        point_index,
+        point_in_set,
+        PointWinnerName,
+        PointServerName,
+        winner_y
+      )
+  })
+  
+  # -------------------------------
+  # C) markers table
+  # -------------------------------
+  start_markers <- streaks_table %>%
+    left_join(
+      player_seq %>% select(point_index, SetNo, point_in_set, winner_y),
+      by = c("streak_start_point" = "point_index")
+    ) %>%
+    transmute(
+      match_id,
+      player_name,
+      min_length,
+      allowed_losses,
+      streak_id,
+      SetNo,
+      point_index = streak_start_point,
+      point_in_set,
+      marker_type = "streak_start",
+      marker_y = winner_y
+    )
+  
+  end_markers <- streaks_table %>%
+    left_join(
+      player_seq %>% select(point_index, SetNo, point_in_set, winner_y),
+      by = c("streak_end_point" = "point_index")
+    ) %>%
+    transmute(
+      match_id,
+      player_name,
+      min_length,
+      allowed_losses,
+      streak_id,
+      SetNo,
+      point_index = streak_end_point,
+      point_in_set,
+      marker_type = "streak_end",
+      marker_y = winner_y
+    )
+  
+  interruption_markers <- player_seq %>%
+    filter(one_point_interruption, PointWinnerName == player_name) %>%
+    transmute(
+      match_id,
+      player_name,
+      min_length = NA_integer_,
+      allowed_losses = NA_integer_,
+      streak_id = NA_integer_,
+      SetNo,
+      point_index,
+      point_in_set,
+      marker_type = "one_point_interruption",
+      marker_y = winner_y
+    )
+  
+  break_markers <- player_seq %>%
+    filter(streak_break, PointWinnerName == player_name) %>%
+    transmute(
+      match_id,
+      player_name,
+      min_length = NA_integer_,
+      allowed_losses = NA_integer_,
+      streak_id = NA_integer_,
+      SetNo,
+      point_index,
+      point_in_set,
+      marker_type = "streak_break",
+      marker_y = winner_y
+    )
+  
+  markers_table <- bind_rows(
+    start_markers,
+    end_markers,
+    interruption_markers,
+    break_markers
+  ) %>%
+    arrange(match_id, player_name, SetNo, point_index, marker_type)
+  
+  list(
+    streaks_table = streaks_table,
+    streak_overlay_table = streak_overlay_table,
+    markers_table = markers_table
+  )
+}
+
+# =========================================================
+# 5) LOOP OVER MATCHES
+#    Important: each match is processed separately
+# =========================================================
+all_match_ids <- points_clean %>%
+  distinct(match_id) %>%
+  pull(match_id)
+
+points_out <- list()
+games_out <- list()
+streaks_out <- list()
+overlay_out <- list()
+markers_out <- list()
+
+for (mid in all_match_ids) {
+  
+  message("Processing match: ", mid)
+  
+  match_raw <- points_clean %>%
+    filter(match_id == mid) %>%
+    arrange(SetNo, GameNo, PointNumber)
+  
+  if (nrow(match_raw) == 0) next
+  
+  match_seq <- build_match_seq(match_raw)
+  
+  # -------------------------------------------------
+  # main points table (for black line + black points)
+  # -------------------------------------------------
+  points_table_i <- match_seq %>%
+    transmute(
+    match_id,
+    SetNo,
+    GameNo,
+    point_index,
+    point_in_set,
+    P1Score,
+    P2Score,
+    point_score = paste0(P1Score, "-", P2Score),
+    P1_name,
+    P2_name,
+    PointWinnerName,
+    PointServerName,
+    winner_y,
+    run_id,
+    run_length,
+    prev_run_length,
+    streak_break,
+    one_point_interruption,
+    next_x,
+    next_y
+  )
+  
+  points_out[[mid]] <- points_table_i
+  
+  # -------------------------------------------------
+  # game shading table
+  # -------------------------------------------------
+  games_out[[mid]] <- build_game_summary(match_seq)
+  
+  # -------------------------------------------------
+  # player streak tables
+  # -------------------------------------------------
+  p1_name <- first(match_seq$P1_name)
+  p2_name <- first(match_seq$P2_name)
+  
+  player_names <- c(p1_name, p2_name)
+  
+  for (pl in player_names) {
+    out <- build_player_streak_outputs(
+      match_seq = match_seq,
+      player_name = pl,
+      param_grid = param_grid
+    )
+    
+    streaks_out[[paste(mid, pl, "streaks", sep = "__")]] <- out$streaks_table
+    overlay_out[[paste(mid, pl, "overlay", sep = "__")]] <- out$streak_overlay_table
+    markers_out[[paste(mid, pl, "markers", sep = "__")]] <- out$markers_table
+  }
+}
+
+# =========================================================
+# 6) FINAL TABLES
+# =========================================================
+points_tableau <- bind_rows(points_out)
+games_tableau <- bind_rows(games_out)
+streaks_tableau <- bind_rows(streaks_out)
+streak_overlay_tableau <- bind_rows(overlay_out)
+markers_tableau <- bind_rows(markers_out)
+
+# =========================================================
+# 7) WRITE CSV FILES
+# =========================================================
+write_csv(points_tableau, "points_tableau.csv")
+write_csv(games_tableau, "games_tableau.csv")
+write_csv(streaks_tableau, "streaks_tableau.csv")
+write_csv(streak_overlay_tableau, "streak_overlay_tableau.csv")
+write_csv(markers_tableau, "markers_tableau.csv")
+
+# =========================================================
+# 8) QUICK CHECKS
+#    These are only checks, not final summary tables
+# =========================================================
+cat("\nCreated CSV files:\n")
+cat("- points_tableau.csv\n")
+cat("- games_tableau.csv\n")
+cat("- streaks_tableau.csv\n")
+cat("- streak_overlay_tableau.csv\n")
+cat("- markers_tableau.csv\n")
+
+cat("\nRow counts:\n")
+cat("points_tableau:", nrow(points_tableau), "\n")
+cat("games_tableau:", nrow(games_tableau), "\n")
+cat("streaks_tableau:", nrow(streaks_tableau), "\n")
+cat("streak_overlay_tableau:", nrow(streak_overlay_tableau), "\n")
+cat("markers_tableau:", nrow(markers_tableau), "\n")
+
+# Example single-match check:
+# streaks_tableau %>%
+#   filter(match_id == "2011-frenchopen-1403",
+#          player_name == "Andy Murray",
+#          min_length == 8,
+#          allowed_losses == 1)
+```
+```{r}
+streaks_tableau %>%
+  filter(match_id == "2011-frenchopen-1403",
+         player_name == "Andy Murray",
+         min_length == 8,
+         allowed_losses == 1)
+```
+
