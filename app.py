@@ -114,8 +114,6 @@ def prepare_match_points(points, match_id):
     match_df["game_score"] = match_df["P1Score_clean"] + "-" + match_df["P2Score_clean"]
     match_df["games_in_set"] = match_df["P1GamesWon_clean"] + "-" + match_df["P2GamesWon_clean"]
 
-    # Simplified hover text.
-    # Removed: Point details title, Set, Point winner, Server.
     match_df["hover_text"] = (
         "Game: " + match_df["GameNo"].astype(str)
         + "<br>Point in set: " + match_df["point_in_set"].astype(str)
@@ -127,17 +125,23 @@ def prepare_match_points(points, match_id):
 
 
 # ------------------------------------------------------------
-# Sliding-window relaxed streak detection
+# Non-overlapping relaxed streak detection
 # ------------------------------------------------------------
 def detect_relaxed_streaks_in_sequence(seq, point_nums=None, min_wins=8, allowed_losses=1):
     """
-    Detect relaxed streaks using a sliding-window / all-start-points method.
+    Detect relaxed streaks using sequential non-overlapping logic.
 
-    This version does not jump to the end of a detected streak.
-    Every point is tested as a possible streak start.
+    Rules:
+    - A streak must start with a point won by the streaking player.
+    - The streak is extended as far as possible while losses <= allowed_losses.
+    - After a valid streak is saved:
+        * If the streak contains no loss, the next search starts after the streak ends.
+        * If the streak contains a loss, the next search starts after the first lost point
+          inside that streak.
 
-    Example:
-    1 1 1 1 1 1 0 is valid when min_wins = 6 and allowed_losses = 1.
+    This prevents a pure 8-point consecutive run from being counted as multiple
+    overlapping 6-point streaks, while still allowing limited relaxed-streak overlap
+    only after an interruption point.
     """
 
     seq = np.asarray(seq).astype(int)
@@ -149,17 +153,18 @@ def detect_relaxed_streaks_in_sequence(seq, point_nums=None, min_wins=8, allowed
         point_nums = np.asarray(point_nums)
 
     streaks = []
+    start = 0
 
-    for start in range(n):
+    while start < n:
         if seq[start] != 1:
+            start += 1
             continue
 
         wins = 0
         losses = 0
-
         best_end = None
-        best_wins = 0
-        best_losses = 0
+        best_wins = None
+        best_losses = None
 
         for end in range(start, n):
             if seq[end] == 1:
@@ -175,16 +180,27 @@ def detect_relaxed_streaks_in_sequence(seq, point_nums=None, min_wins=8, allowed
                 best_wins = wins
                 best_losses = losses
 
-        if best_end is not None:
-            streaks.append({
-                "start_index": int(start),
-                "end_index": int(best_end),
-                "start_point": int(point_nums[start]),
-                "end_point": int(point_nums[best_end]),
-                "points_won_in_streak": int(best_wins),
-                "points_lost_in_streak": int(best_losses),
-                "duration_points": int(point_nums[best_end] - point_nums[start] + 1),
-            })
+        if best_end is None:
+            start += 1
+            continue
+
+        streaks.append({
+            "start_index": int(start),
+            "end_index": int(best_end),
+            "start_point": int(point_nums[start]),
+            "end_point": int(point_nums[best_end]),
+            "points_won_in_streak": int(best_wins),
+            "points_lost_in_streak": int(best_losses),
+            "duration_points": int(best_end - start + 1),
+        })
+
+        segment = seq[start:best_end + 1]
+        loss_positions = np.where(segment == 0)[0]
+
+        if len(loss_positions) == 0:
+            start = best_end + 1
+        else:
+            start = start + int(loss_positions[0]) + 1
 
     return streaks
 
@@ -329,7 +345,7 @@ def actual_streak_count_for_scope(match_df, player_number, min_wins, allowed_los
 
 
 # ------------------------------------------------------------
-# Estimate server win rate
+# Estimate server win rate across all matches
 # ------------------------------------------------------------
 def estimate_server_win_rate(df):
     valid = df[
@@ -377,10 +393,12 @@ def run_binomial_simulations_with_paths(
 
     sim_counts = []
     sim_paths = []
+    sim_prob_paths = []
 
     for _ in range(n_sim):
         total_count = 0
         by_set = []
+        probs_by_set = []
 
         for set_idx, set_len in enumerate(set_lengths):
             set_len = int(set_len)
@@ -388,20 +406,27 @@ def run_binomial_simulations_with_paths(
             if simulation_model == "Serve-adjusted Bernoulli":
                 servers = np.asarray(server_sequences[set_idx]).astype(int)
 
+                # Player A receives a probability increase when Player A serves.
+                # Player A receives a probability decrease when the opponent serves.
                 probs = np.where(
                     servers == player_a_number,
                     p + serve_advantage,
                     p - serve_advantage
                 )
 
+                # Unknown server values fall back to the base probability.
                 probs = np.where(np.isin(servers, [1, 2]), probs, p)
+
+                # Keep probabilities valid.
                 probs = np.clip(probs, 0.0, 1.0)
 
                 seq = rng.binomial(1, probs)
             else:
-                seq = rng.binomial(1, p, size=set_len)
+                probs = np.repeat(p, set_len)
+                seq = rng.binomial(1, probs)
 
             by_set.append(seq.tolist())
+            probs_by_set.append(probs.tolist())
 
             total_count += count_streaks_for_scope(
                 seq=seq,
@@ -412,14 +437,14 @@ def run_binomial_simulations_with_paths(
 
         sim_counts.append(total_count)
         sim_paths.append(by_set)
+        sim_prob_paths.append(probs_by_set)
 
-    return np.array(sim_counts), sim_paths
-
+    return np.array(sim_counts), sim_paths, sim_prob_paths
 
 # ------------------------------------------------------------
 # Build simulated match dataframe
 # ------------------------------------------------------------
-def build_simulated_match_df(sim_paths, server_sequences, p1, p2, player_a_name):
+def build_simulated_match_df(sim_paths, sim_prob_paths, server_sequences, p1, p2, player_a_name):
     player_a_number = 1 if player_a_name == p1 else 2
 
     rows = []
@@ -427,6 +452,7 @@ def build_simulated_match_df(sim_paths, server_sequences, p1, p2, player_a_name)
 
     for set_no, seq in enumerate(sim_paths, start=1):
         servers = server_sequences[set_no - 1]
+        probs = sim_prob_paths[set_no - 1]
 
         for point_in_set, a_win in enumerate(seq, start=1):
             global_point += 1
@@ -437,6 +463,8 @@ def build_simulated_match_df(sim_paths, server_sequences, p1, p2, player_a_name)
                 point_winner = 2 if player_a_number == 1 else 1
 
             server_number = int(servers[point_in_set - 1])
+            prob_player_a_wins = float(probs[point_in_set - 1])
+
             winner_name = p1 if point_winner == 1 else p2
             server_name = p1 if server_number == 1 else p2 if server_number == 2 else "Unknown"
             winner_y = 1.0 if point_winner == 1 else 0.0
@@ -450,18 +478,20 @@ def build_simulated_match_df(sim_paths, server_sequences, p1, p2, player_a_name)
                 "winner_y": winner_y,
                 "winner_name_clean": winner_name,
                 "server_name_clean": server_name,
+                "prob_player_a_wins": prob_player_a_wins,
             })
 
     sim_df = pd.DataFrame(rows)
 
-    # Simplified simulated hover text.
     sim_df["hover_text"] = (
         "Point in set: " + sim_df["point_in_set"].astype(str)
+        + "<br>Winner: " + sim_df["winner_name_clean"].astype(str)
+        + "<br>Server: " + sim_df["server_name_clean"].astype(str)
         + "<br>Player A: " + str(player_a_name)
+        + "<br>P(Player A wins): " + sim_df["prob_player_a_wins"].round(3).astype(str)
     )
 
     return sim_df
-
 
 # ------------------------------------------------------------
 # Calculate simulated streaks for plotting
@@ -800,6 +830,7 @@ def make_point_plot(match_df, match_games, streaks_df, p1, p2, match_id):
 def make_simulated_point_plot(
     sim_df,
     sim_streaks_df,
+    match_games,
     p1,
     p2,
     player_a_name,
@@ -821,12 +852,15 @@ def make_simulated_point_plot(
 
     for row, set_no in enumerate(sets, start=1):
         set_df = sim_df[sim_df["SetNo"] == set_no].copy()
+        set_games = match_games[match_games["SetNo"] == set_no].copy()
 
         if not sim_streaks_df.empty:
             set_streaks = sim_streaks_df[sim_streaks_df["SetNo"] == int(set_no)].copy()
         else:
             set_streaks = pd.DataFrame()
 
+        # Keep the same actual server shading in the simulated match.
+        add_server_shading(fig, set_games, row, p1, p2)
         add_streak_tubes(fig, set_df, set_streaks, row)
 
         fig.add_trace(
@@ -869,12 +903,12 @@ def make_simulated_point_plot(
         title=dict(
             text=(
                 f"Representative Simulated Match — Player A: {player_a_name}, "
-                f"p = {p:.2f}, model = {simulation_model}, scope = {scope}, "
+                f"model = {simulation_model}, scope = {scope}, "
                 f"simulated streaks = {rep_count}"
             ),
             x=0.5,
             xanchor="center",
-            font=dict(size=20, color="black")
+            font=dict(size=18, color="black")
         ),
         height=max(650, 175 * n_sets),
         margin=dict(l=130, r=40, t=115, b=40),
@@ -977,6 +1011,12 @@ allowed_losses = st.sidebar.selectbox(
     index=1
 )
 
+st.sidebar.caption(
+    "Streak detection uses the sequential non-overlapping rule: pure consecutive runs "
+    "do not restart until the previous run is broken; relaxed streaks may restart only "
+    "after the first allowed loss inside the previous streak."
+)
+
 
 # ------------------------------------------------------------
 # Sidebar: simulation controls
@@ -1018,6 +1058,7 @@ simulation_model = st.sidebar.selectbox(
 
 overall_server_win_rate = estimate_server_win_rate(points)
 estimated_serve_advantage = overall_server_win_rate - 0.50
+estimated_serve_advantage = max(float(estimated_serve_advantage), 0.0)
 
 serve_advantage = 0.0
 
@@ -1027,21 +1068,19 @@ if simulation_model == "Serve-adjusted Bernoulli":
         f"Estimated serve advantage: {estimated_serve_advantage:.3f}."
     )
 
-    use_estimated_serve_advantage = st.sidebar.checkbox(
-        "Use overall observed serve advantage",
-        value=True
+    serve_advantage = st.sidebar.number_input(
+        "Serve Advantage Used (+/-):",
+        min_value=0.000,
+        max_value=0.250,
+        value=float(round(estimated_serve_advantage, 3)),
+        step=0.005,
+        format="%.3f"
     )
 
-    if use_estimated_serve_advantage:
-        serve_advantage = estimated_serve_advantage
-    else:
-        serve_advantage = st.sidebar.number_input(
-            "Manual Serve Advantage:",
-            min_value=0.00,
-            max_value=0.20,
-            value=0.03,
-            step=0.01
-        )
+    st.sidebar.caption(
+        "This value is added to Player A's point-win probability when Player A served "
+        "that point, and subtracted when Player A returned."
+    )
 
 use_seed = st.sidebar.checkbox(
     "Use random seed for reproducibility",
@@ -1156,8 +1195,17 @@ if simulation_model == "Serve-adjusted Bernoulli":
         f"""
         **Simulation model:** Serve-adjusted Bernoulli  
         **Overall server win rate across all matches:** {overall_server_win_rate:.3f}  
+        **Estimated serve advantage:** {estimated_serve_advantage:.3f}  
         **Serve advantage used:** {serve_advantage:.3f}  
+        **Player A serving probability:** {min(max(p_sim + serve_advantage, 0), 1):.3f}  
+        **Player A returning probability:** {min(max(p_sim - serve_advantage, 0), 1):.3f}  
         """
+    )
+
+    st.caption(
+        "The simulation preserves the selected match's actual set lengths and point-by-point "
+        "server sequence. The red/blue serve regions in the simulated plot are therefore the same "
+        "as the actual match. Only the point winners are randomly generated."
     )
 else:
     st.markdown(
@@ -1172,7 +1220,7 @@ else:
 # Run simulation after button click
 # ------------------------------------------------------------
 if run_sim:
-    sim_counts, sim_paths_all = run_binomial_simulations_with_paths(
+    sim_counts, sim_paths_all, sim_prob_paths_all = run_binomial_simulations_with_paths(
         set_lengths=set_lengths,
         server_sequences=server_sequences,
         player_a_number=sim_player_number,
@@ -1192,10 +1240,12 @@ if run_sim:
     rep_idx = int(np.argmin(np.abs(sim_counts - sim_median)))
 
     rep_paths = sim_paths_all[rep_idx]
+    rep_prob_paths = sim_prob_paths_all[rep_idx]
     rep_count = int(sim_counts[rep_idx])
 
     sim_match_df = build_simulated_match_df(
         sim_paths=rep_paths,
+        sim_prob_paths=rep_prob_paths,
         server_sequences=server_sequences,
         p1=p1,
         p2=p2,
@@ -1242,6 +1292,7 @@ if run_sim:
     sim_fig = make_simulated_point_plot(
         sim_df=sim_match_df,
         sim_streaks_df=sim_streaks_df,
+        match_games=match_games,
         p1=p1,
         p2=p2,
         player_a_name=sim_player,
@@ -1256,20 +1307,20 @@ if run_sim:
     if simulation_model == "Serve-adjusted Bernoulli":
         st.caption(
             f"Simulation note: Each simulated point is an independent Bernoulli trial for Player A. "
-            f"The base probability is p = {p_sim:.2f}. The serve advantage is estimated from the "
-            f"overall server win rate across all matches in the dataset. When Player A served in the "
-            f"actual match's server sequence, the simulation used p + serve advantage = "
-            f"{min(max(p_sim + serve_advantage, 0), 1):.3f}. When Player A returned, it used "
-            f"p - serve advantage = {min(max(p_sim - serve_advantage, 0), 1):.3f}. "
-            f"The same set lengths and actual server sequence are preserved. Streaks are counted using "
-            f"minimum wins = {min_length}, allowed losses = {allowed_losses}, and scope = {sim_scope}."
+            f"The base probability is p = {p_sim:.2f}. The selected match's actual server sequence "
+            f"is preserved point-by-point. When Player A served in that sequence, the simulation used "
+            f"p + serve advantage = {min(max(p_sim + serve_advantage, 0), 1):.3f}. "
+            f"When Player A returned, it used p - serve advantage = "
+            f"{min(max(p_sim - serve_advantage, 0), 1):.3f}. "
+            f"Streaks are counted using minimum wins = {min_length}, allowed losses = "
+            f"{allowed_losses}, and scope = {sim_scope}."
         )
     else:
         st.caption(
             f"Simulation note: Each simulated point is an independent Bernoulli trial for Player A "
             f"with p = {p_sim:.2f}. The simulated match uses the same set lengths as the selected match, "
-            f"and streaks are counted using minimum wins = {min_length}, allowed losses = {allowed_losses}, "
-            f"and scope = {sim_scope}."
+            f"and streaks are counted using minimum wins = {min_length}, allowed losses = "
+            f"{allowed_losses}, and scope = {sim_scope}."
         )
 
 else:
