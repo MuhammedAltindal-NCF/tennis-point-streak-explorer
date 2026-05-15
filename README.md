@@ -1,5 +1,7 @@
 # Tennis Point Streak Explorer
 
+**Live Streamlit App:** [Open the app](https://tennis-point-streak-explorer.streamlit.app/)
+
 ## Project Overview
 
 This project is an interactive Streamlit application for exploring point-by-point streaks in Grand Slam tennis matches.
